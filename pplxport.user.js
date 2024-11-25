@@ -85,9 +85,6 @@
         // Convert strong sections to headers and clean up content
         let text = tempDiv.innerHTML;
 
-        // Convert strong text at start of lines to h3
-        text = text.replace(/^\s*<strong>([^<]+)<\/strong>/gm, '### $1');
-
         // Basic HTML conversion
         text = text
             .replace(/<h1[^>]*>(.*?)<\/h1>/g, '# $1')
@@ -98,7 +95,42 @@
             .replace(/<strong>([\s\S]*?)<\/strong>/g, '**$1**')
             .replace(/<em>([\s\S]*?)<\/em>/g, '*$1*')
             .replace(/<ul[^>]*>([\s\S]*?)<\/ul>/g, '$1\n')
-            .replace(/<li[^>]*>([\s\S]*?)<\/li>/g, ' - $1\n')
+            .replace(/<li[^>]*>([\s\S]*?)<\/li>/g, ' - $1\n');
+
+        // Handle tables before removing remaining HTML
+        text = text.replace(/<table[^>]*>([\s\S]*?)<\/table>/g, (match) => {
+            const tableDiv = document.createElement('div');
+            tableDiv.innerHTML = match;
+            const rows = [];
+            
+            // Process header rows
+            const headerRows = tableDiv.querySelectorAll('thead tr');
+            if (headerRows.length > 0) {
+                headerRows.forEach(row => {
+                    const cells = [...row.querySelectorAll('th, td')].map(cell => cell.textContent.trim() || ' ');
+                    if (cells.length > 0) {
+                        rows.push(`| ${cells.join(' | ')} |`);
+                        // Add separator row after headers
+                        rows.push(`| ${cells.map(() => '---').join(' | ')} |`);
+                    }
+                });
+            }
+
+            // Process body rows
+            const bodyRows = tableDiv.querySelectorAll('tbody tr');
+            bodyRows.forEach(row => {
+                const cells = [...row.querySelectorAll('td')].map(cell => cell.textContent.trim() || ' ');
+                if (cells.length > 0) {
+                    rows.push(`| ${cells.join(' | ')} |`);
+                }
+            });
+
+            // Return markdown table with proper spacing
+            return rows.length > 0 ? `\n\n${rows.join('\n')}\n\n` : '';
+        });
+
+        // Continue with remaining HTML conversion
+        text = text
             .replace(/<pre><code>([\s\S]*?)<\/code><\/pre>/g, '```\n$1\n```')
             .replace(/<code>(.*?)<\/code>/g, '`$1`')
             .replace(/<a\s+(?:[^>]*?\s+)?href="([^"]*)"[^>]*>(.*?)<\/a>/g, '[$2]($1)')
