@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Perplexity.ai Chat Exporter
 // @namespace    https://github.com/ckep1/pplxport
-// @version      1.0.0
+// @version      1.0.1
 // @description  Export Perplexity.ai conversations as markdown with configurable citation styles
 // @author       Chris Kephart
 // @match        https://www.perplexity.ai/*
@@ -63,7 +63,8 @@
         const citations = [...tempDiv.querySelectorAll('a.citation')];
         const citationRefs = new Map();
         citations.forEach(citation => {
-            const number = citation.querySelector('div')?.textContent.trim();
+            const numberDiv = citation.querySelector('div');
+            const number = numberDiv ? numberDiv.textContent.trim() : null;
             const href = citation.getAttribute('href');
             if (number && href) {
                 citationRefs.set(number, { href });
@@ -72,7 +73,8 @@
 
         // Clean up citations based on style
         tempDiv.querySelectorAll('.citation').forEach(el => {
-            const number = el.querySelector('div')?.textContent.trim();
+            const numberDiv = el.querySelector('div');
+            const number = numberDiv ? numberDiv.textContent.trim() : null;
             const href = el.getAttribute('href');
 
             if (citationStyle === CITATION_STYLES.INLINE) {
@@ -85,7 +87,7 @@
         // Convert strong sections to headers and clean up content
         let text = tempDiv.innerHTML;
 
-        // Basic HTML conversion
+        //  Basic HTML conversion
         text = text
             .replace(/<h1[^>]*>(.*?)<\/h1>/g, '# $1')
             .replace(/<h2[^>]*>(.*?)<\/h2>/g, '## $1')
