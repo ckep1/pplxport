@@ -157,6 +157,11 @@
       .replace(/[ \t]+$/gm, "") // Remove trailing spaces
       .trim();
 
+    if (citationStyle === CITATION_STYLES.INLINE) {
+      // Remove extraneous space before a period: e.g. " [1](url) ." -> " [1](url)."
+      text = text.replace(/\s+\./g, ".");
+    }
+
     // Add citations at the bottom for endnotes style
     if (citationStyle === CITATION_STYLES.ENDNOTES && citationRefs.size > 0) {
       text += "\n\n### Sources\n";
