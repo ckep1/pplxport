@@ -293,10 +293,9 @@
       }
 
       const title = document.title.replace(" | Perplexity", "").trim();
-      const timestamp = new Date().toISOString().replace(/[:]/g, "-").split("T")[0];
       const safeTitle = title
         .toLowerCase()
-        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/[^a-z0-9]+/g, " ")
         .replace(/^-+|-+$/g, "");
       const filename = `${safeTitle}.md`;
 
