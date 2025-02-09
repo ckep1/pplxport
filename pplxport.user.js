@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Perplexity.ai Chat Exporter
 // @namespace    https://github.com/ckep1/pplxport
-// @version      1.0.2
+// @version      1.0.3
 // @description  Export Perplexity.ai conversations as markdown with configurable citation styles
 // @author       Chris Kephart
 // @match        https://www.perplexity.ai/*
@@ -58,6 +58,26 @@
   function htmlToMarkdown(html, citationStyle = CITATION_STYLES.ENDNOTES) {
     const tempDiv = document.createElement("div");
     tempDiv.innerHTML = html;
+
+    tempDiv.querySelectorAll("code").forEach((codeElem) => {
+      if (codeElem.style.whiteSpace && codeElem.style.whiteSpace.includes("pre-wrap")) {
+        if (codeElem.parentElement.tagName.toLowerCase() !== "pre") {
+          const pre = document.createElement("pre");
+          let language = "";
+          const prevDiv = codeElem.closest("div.pr-lg")?.previousElementSibling;
+          if (prevDiv) {
+            const langDiv = prevDiv.querySelector(".text-text-200");
+            if (langDiv) {
+              language = langDiv.textContent.trim().toLowerCase();
+              langDiv.remove();
+            }
+          }
+          pre.dataset.language = language;
+          pre.innerHTML = "<code>" + codeElem.innerHTML + "</code>";
+          codeElem.parentNode.replaceChild(pre, codeElem);
+        }
+      }
+    });
 
     // Process citations
     const citations = [...tempDiv.querySelectorAll("a.citation")];
@@ -134,6 +154,7 @@
 
     // Continue with remaining HTML conversion
     text = text
+      .replace(/<pre[^>]*data-language="([^"]*)"[^>]*><code>([\s\S]*?)<\/code><\/pre>/g, "```$1\n$2\n```")
       .replace(/<pre><code>([\s\S]*?)<\/code><\/pre>/g, "```\n$1\n```")
       .replace(/<code>(.*?)<\/code>/g, "`$1`")
       .replace(/<a\s+(?:[^>]*?\s+)?href="([^"]*)"[^>]*>(.*?)<\/a>/g, "[$2]($1)")
@@ -262,7 +283,7 @@
     button.style.cssText = `
             position: fixed;
             bottom: 20px;
-            right: 20px;
+            right: 80px;
             padding: 8px 16px;
             background-color: #6366f1;
             color: white;
