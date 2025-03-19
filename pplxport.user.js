@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Perplexity.ai Chat Exporter
 // @namespace    https://github.com/ckep1/pplxport
-// @version      1.0.3
+// @version      1.0.9
 // @description  Export Perplexity.ai conversations as markdown with configurable citation styles
 // @author       Chris Kephart
 // @match        https://www.perplexity.ai/*
@@ -110,9 +110,12 @@
 
     //  Basic HTML conversion
     text = text
-      .replace(/<h1[^>]*>(.*?)<\/h1>/g, "# $1")
-      .replace(/<h2[^>]*>(.*?)<\/h2>/g, "## $1")
-      .replace(/<h3[^>]*>(.*?)<\/h3>/g, "### $1")
+      .replace(/<h1[^>]*>([\s\S]*?)<\/h1>/g, "# $1")
+      .replace(/<h2[^>]*>([\s\S]*?)<\/h2>/g, "## $1")
+      .replace(/<h3[^>]*>([\s\S]*?)<\/h3>/g, "### $1")
+      .replace(/<h4[^>]*>([\s\S]*?)<\/h4>/g, "#### $1")
+      .replace(/<h5[^>]*>([\s\S]*?)<\/h5>/g, "##### $1")
+      .replace(/<h6[^>]*>([\s\S]*?)<\/h6>/g, "###### $1")
       .replace(/<p[^>]*>([\s\S]*?)<\/p>/g, "$1\n")
       .replace(/<br\s*\/?>/g, "\n")
       .replace(/<strong>([\s\S]*?)<\/strong>/g, "**$1**")
@@ -161,14 +164,37 @@
       .replace(/<[^>]+>/g, ""); // Remove any remaining HTML tags
 
     // Clean up whitespace
-    // Convert bold text at start of line to h3 headers
-    text = text.replace(/^(\s*)\*\*([^*\n]+)\*\*/gm, "$1### $2");
+    // Convert bold text at start of line to h3 headers, but not if inside a list item
+    text = text.replace(/^(\s*)\*\*([^*\n]+)\*\*(?!.*\n\s*-)/gm, "$1### $2");
+    
+    // This fixes list items where the entire text was incorrectly converted to headers
+    // We need to preserve both partial bold items and fully bold items
+    text = text.replace(/^(\s*-\s+)###\s+([^\n]+)/gm, function(match, listPrefix, content) {
+      // Check if the content contains bold markers
+      if (content.includes("**")) {
+        // If it already has bold markers, just remove the ### and keep the rest intact
+        return `${listPrefix}${content}`;
+      } else {
+        // If it doesn't have bold markers (because it was fully bold before), 
+        // add them back (this was incorrectly converted to a header)
+        return `${listPrefix}**${content}**`;
+      }
+    });
 
     // Fix list spacing (no extra newlines between items)
     text = text.replace(/\n\s*-\s+/g, "\n- ");
 
     // Ensure headers have proper spacing
     text = text.replace(/([^\n])(\n#{1,3} )/g, "$1\n\n$2");
+    
+    // Fix unbalanced or misplaced bold markers in list items
+    text = text.replace(/^(\s*-\s+.*?)(\s\*\*\s*)$/gm, "$1"); // Remove trailing ** with space before
+    
+    // Fix citation and bold issues - make sure citations aren't wrapped in bold
+    text = text.replace(/\*\*([^*]+)(\[[0-9]+\]\([^)]+\))\s*\*\*/g, "**$1**$2");
+    
+    // Fix cases where a line ends with an extra bold marker after a citation
+    text = text.replace(/(\[[0-9]+\]\([^)]+\))\s*\*\*/g, "$1");
 
     // Clean up whitespace
     text = text
@@ -231,27 +257,48 @@
   // Extract conversation content
   function extractConversation(citationStyle) {
     const conversation = [];
-    const contentBlocks = document.querySelectorAll(".grid-cols-12 > div");
+    console.log("Using updated selectors for Perplexity");
+    
+    // Check for user query
+    const userQueries = document.querySelectorAll(".whitespace-pre-line.text-pretty.break-words");
+    userQueries.forEach(query => {
+      conversation.push({
+        role: "User",
+        content: query.textContent.trim(),
+      });
+    });
 
-    for (const block of contentBlocks) {
-      // Extract question
-      const questionDiv = block.querySelector(".whitespace-pre-line.break-words");
-      if (questionDiv) {
+    // Check for assistant responses
+    const assistantResponses = document.querySelectorAll(".prose.text-pretty.dark\\:prose-invert");
+    assistantResponses.forEach(response => {
+      const answerContent = response.cloneNode(true);
+      conversation.push({
+        role: "Assistant",
+        content: htmlToMarkdown(answerContent.innerHTML, citationStyle),
+      });
+    });
+
+    // Fallback to more generic selectors if needed
+    if (conversation.length === 0) {
+      console.log("Attempting to use fallback selectors");
+      
+      // Try more generic selectors that might match Perplexity's structure
+      const queryElements = document.querySelectorAll("[class*='whitespace-pre-line'][class*='break-words']");
+      queryElements.forEach(query => {
         conversation.push({
           role: "User",
-          content: questionDiv.textContent.trim(),
+          content: query.textContent.trim(),
         });
-      }
+      });
 
-      // Extract answer
-      const answerDiv = block.querySelector(".prose.dark\\:prose-invert");
-      if (answerDiv) {
-        const answerContent = answerDiv.cloneNode(true);
+      const responseElements = document.querySelectorAll("[class*='prose'][class*='prose-invert']");
+      responseElements.forEach(response => {
+        const answerContent = response.cloneNode(true);
         conversation.push({
           role: "Assistant",
           content: htmlToMarkdown(answerContent.innerHTML, citationStyle),
         });
-      }
+      });
     }
 
     return conversation;
@@ -330,7 +377,9 @@
   // Initialize the script
   function init() {
     const observer = new MutationObserver(() => {
-      if (document.querySelector(".grid-cols-12") && !document.getElementById("perplexity-export-btn")) {
+      if ((document.querySelector(".prose.text-pretty.dark\\:prose-invert") ||
+           document.querySelector("[class*='prose'][class*='prose-invert']")) && 
+          !document.getElementById("perplexity-export-btn")) {
         addExportButton();
       }
     });
@@ -340,7 +389,8 @@
       subtree: true,
     });
 
-    if (document.querySelector(".grid-cols-12")) {
+    if (document.querySelector(".prose.text-pretty.dark\\:prose-invert") ||
+        document.querySelector("[class*='prose'][class*='prose-invert']")) {
       addExportButton();
     }
   }
