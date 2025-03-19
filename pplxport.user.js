@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Perplexity.ai Chat Exporter
 // @namespace    https://github.com/ckep1/pplxport
-// @version      1.0.4
+// @version      1.0.5
 // @description  Export Perplexity.ai conversations as markdown with configurable citation styles
 // @author       Chris Kephart
 // @match        https://www.perplexity.ai/*
@@ -18,6 +18,7 @@
   const CITATION_STYLES = {
     ENDNOTES: "endnotes",
     INLINE: "inline",
+    PARENTHESIZED: "parenthesized",
   };
 
   const FORMAT_STYLES = {
@@ -28,7 +29,7 @@
   // Get user preferences
   function getPreferences() {
     return {
-      citationStyle: GM_getValue("citationStyle", CITATION_STYLES.ENDNOTES),
+      citationStyle: GM_getValue("citationStyle", CITATION_STYLES.PARENTHESIZED),
       formatStyle: GM_getValue("formatStyle", FORMAT_STYLES.FULL),
     };
   }
@@ -44,6 +45,11 @@
     alert("Citation style set to inline. Format: [1](url)");
   });
 
+  GM_registerMenuCommand("Use Parenthesized Citation Style", () => {
+    GM_setValue("citationStyle", CITATION_STYLES.PARENTHESIZED);
+    alert("Citation style set to parenthesized. Format: ([1](url))");
+  });
+
   GM_registerMenuCommand("Full Format (with User/Assistant)", () => {
     GM_setValue("formatStyle", FORMAT_STYLES.FULL);
     alert("Format set to full with User/Assistant tags.");
@@ -55,7 +61,7 @@
   });
 
   // Convert HTML content to markdown
-  function htmlToMarkdown(html, citationStyle = CITATION_STYLES.ENDNOTES) {
+  function htmlToMarkdown(html, citationStyle = CITATION_STYLES.PARENTHESIZED) {
     const tempDiv = document.createElement("div");
     tempDiv.innerHTML = html;
 
@@ -100,6 +106,8 @@
 
       if (citationStyle === CITATION_STYLES.INLINE) {
         el.replaceWith(` [${number}](${href}) `);
+      } else if (citationStyle === CITATION_STYLES.PARENTHESIZED) {
+        el.replaceWith(` ([${number}](${href})) `);
       } else {
         el.replaceWith(` [${number}] `);
       }
@@ -192,9 +200,11 @@
     
     // Fix citation and bold issues - make sure citations aren't wrapped in bold
     text = text.replace(/\*\*([^*]+)(\[[0-9]+\]\([^)]+\))\s*\*\*/g, "**$1**$2");
+    text = text.replace(/\*\*([^*]+)(\(\[[0-9]+\]\([^)]+\)\))\s*\*\*/g, "**$1**$2");
     
     // Fix cases where a line ends with an extra bold marker after a citation
     text = text.replace(/(\[[0-9]+\]\([^)]+\))\s*\*\*/g, "$1");
+    text = text.replace(/(\(\[[0-9]+\]\([^)]+\)\))\s*\*\*/g, "$1");
 
     // Clean up whitespace
     text = text
@@ -204,7 +214,7 @@
       .replace(/[ \t]+$/gm, "") // Remove trailing spaces
       .trim();
 
-    if (citationStyle === CITATION_STYLES.INLINE) {
+    if (citationStyle === CITATION_STYLES.INLINE || citationStyle === CITATION_STYLES.PARENTHESIZED) {
       // Remove extraneous space before a period: e.g. " [1](url) ." -> " [1](url)."
       text = text.replace(/\s+\./g, ".");
     }
