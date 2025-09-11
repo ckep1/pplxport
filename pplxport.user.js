@@ -1,24 +1,33 @@
 // ==UserScript==
 // @name         Perplexity.ai Chat Exporter
 // @namespace    https://github.com/ckep1/pplxport
-// @version      1.0.5
+// @version      2.0.0
 // @description  Export Perplexity.ai conversations as markdown with configurable citation styles
 // @author       Chris Kephart
 // @match        https://www.perplexity.ai/*
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_registerMenuCommand
+// @run-at       document-idle
 // @license      MIT
 // ==/UserScript==
 
 (function () {
   "use strict";
 
+  // ============================================================================
+  // CONFIGURATION & CONSTANTS
+  // ============================================================================
+
+  const DEBUG = false;
+  const console = DEBUG ? window.console : { log() {}, warn() {}, error() {} };
+
   // Style options
   const CITATION_STYLES = {
     ENDNOTES: "endnotes",
     INLINE: "inline",
     PARENTHESIZED: "parenthesized",
+    NAMED: "named",
   };
 
   const FORMAT_STYLES = {
@@ -26,15 +35,42 @@
     CONCISE: "concise", // Just content, minimal dividers
   };
 
-  // Get user preferences
-  function getPreferences() {
-    return {
-      citationStyle: GM_getValue("citationStyle", CITATION_STYLES.PARENTHESIZED),
-      formatStyle: GM_getValue("formatStyle", FORMAT_STYLES.FULL),
-    };
-  }
+  // Global citation tracking for consistent numbering across all responses
+  const globalCitations = {
+    urlToNumber: new Map(), // normalized URL -> citation number
+    citationRefs: new Map(), // citation number -> {href, sourceName, normalizedUrl}
+    nextCitationNumber: 1,
 
-  // Register menu commands
+    reset() {
+      this.urlToNumber.clear();
+      this.citationRefs.clear();
+      this.nextCitationNumber = 1;
+    },
+
+    addCitation(url, sourceName = null) {
+      const normalizedUrl = normalizeUrl(url);
+      if (!this.urlToNumber.has(normalizedUrl)) {
+        this.urlToNumber.set(normalizedUrl, this.nextCitationNumber);
+        this.citationRefs.set(this.nextCitationNumber, {
+          href: url,
+          sourceName,
+          normalizedUrl,
+        });
+        this.nextCitationNumber++;
+      }
+      return this.urlToNumber.get(normalizedUrl);
+    },
+
+    getCitationNumber(url) {
+      const normalizedUrl = normalizeUrl(url);
+      return this.urlToNumber.get(normalizedUrl);
+    },
+  };
+
+  // ============================================================================
+  // MENU COMMANDS
+  // ============================================================================
+
   GM_registerMenuCommand("Use Endnotes Citation Style", () => {
     GM_setValue("citationStyle", CITATION_STYLES.ENDNOTES);
     alert("Citation style set to endnotes. Format: [1] with sources listed at end.");
@@ -50,6 +86,11 @@
     alert("Citation style set to parenthesized. Format: ([1](url))");
   });
 
+  GM_registerMenuCommand("Use Named Citation Style", () => {
+    GM_setValue("citationStyle", CITATION_STYLES.NAMED);
+    alert("Citation style set to named. Format: [source](url) using source names like 'wikipedia', 'reddit', etc.");
+  });
+
   GM_registerMenuCommand("Full Format (with User/Assistant)", () => {
     GM_setValue("formatStyle", FORMAT_STYLES.FULL);
     alert("Format set to full with User/Assistant tags.");
@@ -59,6 +100,1060 @@
     GM_setValue("formatStyle", FORMAT_STYLES.CONCISE);
     alert("Format set to concise content only.");
   });
+
+  GM_registerMenuCommand("Enable Extra Newlines", () => {
+    GM_setValue("addExtraNewlines", true);
+    alert("Extra newlines enabled. Adds blank lines after paragraphs and list items.");
+  });
+
+  GM_registerMenuCommand("Disable Extra Newlines", () => {
+    GM_setValue("addExtraNewlines", false);
+    alert("Extra newlines disabled. Standard markdown spacing.");
+  });
+
+  // ============================================================================
+  // UTILITY FUNCTIONS
+  // ============================================================================
+
+  // Get user preferences
+  function getPreferences() {
+    return {
+      citationStyle: GM_getValue("citationStyle", CITATION_STYLES.PARENTHESIZED),
+      formatStyle: GM_getValue("formatStyle", FORMAT_STYLES.FULL),
+      addExtraNewlines: GM_getValue("addExtraNewlines", false),
+    };
+  }
+
+  // Extract source name from text, handling various formats
+  function extractSourceName(text) {
+    if (!text) return null;
+
+    // Clean the text
+    text = text.trim();
+
+    // If it's a pattern like "rabbit+2", "reddit+1", extract the source name
+    const plusMatch = text.match(/^([a-zA-Z]+)\+\d+$/);
+    if (plusMatch) {
+      return plusMatch[1];
+    }
+
+    // If it's just text without numbers, use it as is (but clean it up)
+    const cleanName = text.replace(/[^a-zA-Z0-9-_]/g, "").toLowerCase();
+    if (cleanName && cleanName.length > 0) {
+      return cleanName;
+    }
+
+    return null;
+  }
+
+  // Normalize URL by removing fragments (#) to group same page citations
+  function normalizeUrl(url) {
+    if (!url) return null;
+
+    try {
+      const urlObj = new URL(url);
+      // Remove the fragment (hash) portion
+      urlObj.hash = "";
+      return urlObj.toString();
+    } catch (e) {
+      // If URL parsing fails, just remove # manually
+      return url.split("#")[0];
+    }
+  }
+
+  // Extract domain name from URL for named citations
+  function extractDomainName(url) {
+    if (!url) return null;
+
+    try {
+      const urlObj = new URL(url);
+      let domain = urlObj.hostname.toLowerCase();
+
+      // Remove www. prefix
+      domain = domain.replace(/^www\./, "");
+
+      // Get the main domain part (before first dot for common cases)
+      const parts = domain.split(".");
+      if (parts.length >= 2) {
+        // Handle special cases like co.uk, github.io, etc.
+        if (parts[parts.length - 2].length <= 3 && parts.length > 2) {
+          return parts[parts.length - 3];
+        } else {
+          return parts[parts.length - 2];
+        }
+      }
+
+      return parts[0];
+    } catch (e) {
+      return null;
+    }
+  }
+
+  // ============================================================================
+  // DOM HELPER FUNCTIONS
+  // ============================================================================
+
+  function getThreadContainer() {
+    return document.querySelector('.max-w-threadContentWidth, [class*="threadContentWidth"]') || document.querySelector("main") || document.body;
+  }
+
+  function getScrollRoot() {
+    const thread = getThreadContainer();
+    const candidates = [];
+    let node = thread;
+    while (node && node !== document.body) {
+      candidates.push(node);
+      node = node.parentElement;
+    }
+    const scrollingElement = document.scrollingElement || document.documentElement;
+    candidates.push(scrollingElement);
+
+    let best = null;
+    for (const el of candidates) {
+      try {
+        const style = getComputedStyle(el);
+        const overflowY = (style.overflowY || style.overflow || "").toLowerCase();
+        const canScroll = el.scrollHeight - el.clientHeight > 50;
+        const isScrollable = /auto|scroll|overlay/.test(overflowY) || el === scrollingElement;
+        if (canScroll && isScrollable) {
+          if (!best || el.scrollHeight > best.scrollHeight) {
+            best = el;
+          }
+        }
+      } catch (e) {
+        // ignore
+      }
+    }
+    return best || scrollingElement;
+  }
+
+  function isInViewport(el, margin = 8) {
+    const rect = el.getBoundingClientRect();
+    const vh = window.innerHeight || document.documentElement.clientHeight;
+    const vw = window.innerWidth || document.documentElement.clientWidth;
+    return rect.bottom > -margin && rect.top < vh + margin && rect.right > -margin && rect.left < vw + margin;
+  }
+
+  function isCodeCopyButton(btn) {
+    const testId = btn.getAttribute("data-testid");
+    const ariaLower = (btn.getAttribute("aria-label") || "").toLowerCase();
+    if (testId === "copy-code-button" || testId === "copy-code" || (testId && testId.includes("copy-code"))) return true;
+    if (ariaLower.includes("copy code")) return true;
+    if (btn.closest("pre") || btn.closest("code")) return true;
+    return false;
+  }
+
+  function findUserMessageRootFromElement(el) {
+    let node = el;
+    let depth = 0;
+    while (node && node !== document.body && depth < 10) {
+      if (node.querySelector && (node.querySelector("button[data-testid='copy-query-button']") || node.querySelector("button[aria-label='Copy Query']") || node.querySelector("span[data-lexical-text='true']"))) {
+        return node;
+      }
+      node = node.parentElement;
+      depth++;
+    }
+    return el.parentElement || el;
+  }
+
+  function findUserMessageRootFrom(button) {
+    let node = button;
+    let depth = 0;
+    while (node && node !== document.body && depth < 10) {
+      // A user message root should contain lexical text from the input/query
+      if (node.querySelector && (node.querySelector(".whitespace-pre-line.text-pretty.break-words") || node.querySelector("span[data-lexical-text='true']"))) {
+        return node;
+      }
+      node = node.parentElement;
+      depth++;
+    }
+    return button.parentElement || button;
+  }
+
+  function findAssistantMessageRootFrom(button) {
+    let node = button;
+    let depth = 0;
+    while (node && node !== document.body && depth < 10) {
+      // An assistant message root should contain the prose answer block
+      if (node.querySelector && node.querySelector(".prose.text-pretty.dark\\:prose-invert, [class*='prose'][class*='prose-invert'], [data-testid='answer'], [data-testid='assistant']")) {
+        return node;
+      }
+      node = node.parentElement;
+      depth++;
+    }
+    return button.parentElement || button;
+  }
+
+  // ============================================================================
+  // SCROLL & NAVIGATION HELPERS
+  // ============================================================================
+
+  async function pageDownOnce(scroller, delayMs = 500, factor = 0.9) {
+    if (!scroller) scroller = getScrollRoot();
+    const delta = Math.max(200, Math.floor(scroller.clientHeight * factor));
+    scroller.scrollTop = Math.min(scroller.scrollTop + delta, scroller.scrollHeight);
+    await new Promise((r) => setTimeout(r, delayMs));
+  }
+
+  async function preloadPageFully() {
+    try {
+      const scroller = getScrollRoot();
+      window.focus();
+      scroller.scrollTop = 0;
+      await new Promise((resolve) => setTimeout(resolve, 300));
+
+      let lastHeight = scroller.scrollHeight;
+      let stableCount = 0;
+      const maxTries = 80; // ~40s at 500ms intervals
+
+      for (let i = 0; i < maxTries && stableCount < 3; i++) {
+        scroller.scrollTop = scroller.scrollHeight;
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        const newHeight = scroller.scrollHeight;
+        if (newHeight > lastHeight + 10) {
+          lastHeight = newHeight;
+          stableCount = 0;
+        } else {
+          stableCount++;
+        }
+      }
+      // Return to top so processing starts from the beginning
+      scroller.scrollTop = 0;
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    } catch (e) {
+      // Non-fatal; we'll just proceed
+      console.warn("Preload scroll encountered an issue:", e);
+    }
+  }
+
+  function simulateHover(element) {
+    try {
+      const rect = element.getBoundingClientRect();
+      const x = rect.left + Math.min(20, Math.max(2, rect.width / 3));
+      const y = rect.top + Math.min(20, Math.max(2, rect.height / 3));
+      const opts = { bubbles: true, clientX: x, clientY: y };
+      element.dispatchEvent(new MouseEvent("mouseenter", opts));
+      element.dispatchEvent(new MouseEvent("mouseover", opts));
+      element.dispatchEvent(new MouseEvent("mousemove", opts));
+    } catch (e) {
+      // best effort
+    }
+  }
+
+  async function readClipboardWithRetries(maxRetries = 3, delayMs = 200) {
+    let last = "";
+    for (let i = 0; i < maxRetries; i++) {
+      try {
+        const text = await navigator.clipboard.readText();
+        if (text && text.trim() && text !== last) {
+          return text;
+        }
+        last = text;
+      } catch (e) {
+        // keep retrying
+      }
+      await new Promise((r) => setTimeout(r, delayMs));
+    }
+    try {
+      return await navigator.clipboard.readText();
+    } catch {
+      return "";
+    }
+  }
+
+  // Click expanders like "Show more", "Read more", etc. Best-effort
+  const clickedExpanders = new WeakSet();
+
+  function findExpanders(limit = 8) {
+    const candidates = [];
+    const patterns = /(show more|read more|view more|see more|expand|load more|view full|show all|continue reading)/i;
+    const els = document.querySelectorAll('button, a, [role="button"]');
+    for (const el of els) {
+      if (candidates.length >= limit) break;
+      if (clickedExpanders.has(el)) continue;
+      const label = (el.getAttribute("aria-label") || "").trim();
+      const text = (el.textContent || "").trim();
+      if (patterns.test(label) || patterns.test(text)) {
+        // avoid code-block related buttons
+        if (el.closest("pre, code")) continue;
+        candidates.push(el);
+      }
+    }
+    return candidates;
+  }
+
+  async function clickExpandersOnce(limit = 6) {
+    const expanders = findExpanders(limit);
+    if (expanders.length === 0) return false;
+    for (const el of expanders) {
+      try {
+        clickedExpanders.add(el);
+        el.dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
+        await new Promise((r) => setTimeout(r, 50));
+        el.click();
+        await new Promise((r) => setTimeout(r, 150));
+      } catch {}
+    }
+    // allow expanded content to render
+    await new Promise((r) => setTimeout(r, 250));
+    return true;
+  }
+
+  // ============================================================================
+  // BUTTON HELPER FUNCTIONS
+  // ============================================================================
+
+  function getViewportQueryButtons() {
+    const buttons = Array.from(document.querySelectorAll('button[data-testid="copy-query-button"], button[aria-label="Copy Query"]'));
+    return buttons.filter((btn) => isInViewport(btn) && !btn.closest("pre,code"));
+  }
+
+  function getViewportResponseButtons() {
+    const buttons = Array.from(document.querySelectorAll('button[aria-label="Copy"]')).filter((btn) => btn.querySelector("svg.tabler-icon-copy"));
+    return buttons.filter((btn) => isInViewport(btn) && !btn.closest("pre,code"));
+  }
+
+  async function clickVisibleButtonAndGetClipboard(button) {
+    try {
+      window.focus();
+      simulateHover(button);
+      await new Promise((r) => setTimeout(r, 100));
+      button.focus();
+      button.click();
+      await new Promise((r) => setTimeout(r, 200));
+      return await readClipboardWithRetries(3, 150);
+    } catch (e) {
+      return "";
+    }
+  }
+
+  async function clickButtonAndGetClipboard(button) {
+    window.focus();
+    button.scrollIntoView({ behavior: "smooth", block: "center", inline: "center" });
+    await new Promise((r) => setTimeout(r, 200));
+    simulateHover(button);
+    await new Promise((r) => setTimeout(r, 150));
+    button.focus();
+    button.click();
+    await new Promise((r) => setTimeout(r, 500));
+    window.focus();
+    return await readClipboardWithRetries(4, 250);
+  }
+
+  function collectAnchoredMessageRootsOnce() {
+    const roots = new Map(); // rootEl -> { rootEl, top, queryButton, responseButton }
+
+    const queryButtons = Array.from(document.querySelectorAll('button[data-testid="copy-query-button"], button[aria-label="Copy Query"]'));
+    for (const btn of queryButtons) {
+      if (isCodeCopyButton(btn)) continue;
+      const root = findUserMessageRootFrom(btn);
+      const top = root.getBoundingClientRect().top + window.scrollY || btn.getBoundingClientRect().top + window.scrollY;
+      const obj = roots.get(root) || { rootEl: root, top, queryButton: null, responseButton: null };
+      obj.queryButton = obj.queryButton || btn;
+      obj.top = Math.min(obj.top, top);
+      roots.set(root, obj);
+    }
+
+    const responseButtons = Array.from(document.querySelectorAll('button[aria-label="Copy"]')).filter((btn) => btn.querySelector("svg.tabler-icon-copy"));
+    for (const btn of responseButtons) {
+      if (isCodeCopyButton(btn)) continue;
+      const root = findAssistantMessageRootFrom(btn);
+      // Ensure the root actually holds an assistant answer, not some header copy control
+      const hasAnswer = !!root.querySelector(".prose.text-pretty.dark\\:prose-invert, [class*='prose'][class*='prose-invert']");
+      if (!hasAnswer) continue;
+      const top = root.getBoundingClientRect().top + window.scrollY || btn.getBoundingClientRect().top + window.scrollY;
+      const obj = roots.get(root) || { rootEl: root, top, queryButton: null, responseButton: null };
+      obj.responseButton = obj.responseButton || btn;
+      obj.top = Math.min(obj.top, top);
+      roots.set(root, obj);
+    }
+
+    return Array.from(roots.values()).sort((a, b) => a.top - b.top);
+  }
+
+  // ============================================================================
+  // EXTRACTION METHODS - ALL GROUPED TOGETHER
+  // ============================================================================
+
+  // Method 1: Page-down with button clicking (most reliable)
+  async function extractByPageDownClickButtons(citationStyle) {
+    const conversation = [];
+    const processedContent = new Set();
+    const processedQueryButtons = new WeakSet();
+    const processedAnswerButtons = new WeakSet();
+
+    const scroller = getScrollRoot();
+    scroller.scrollTop = 0;
+    await new Promise((r) => setTimeout(r, 200));
+
+    let stableBottomCount = 0;
+    let scrollAttempt = 0;
+    const maxScrollAttempts = 300;
+    const scrollDelay = 500;
+
+    while (scrollAttempt < maxScrollAttempts && stableBottomCount < 5) {
+      scrollAttempt++;
+      let processedSomething = false;
+
+      // Collect visible query/response copy buttons and process in top-to-bottom order
+      const qButtons = getViewportQueryButtons().map((btn) => ({ btn, role: "User" }));
+      const rButtons = getViewportResponseButtons().map((btn) => ({ btn, role: "Assistant" }));
+      const allButtons = [...qButtons, ...rButtons].sort((a, b) => {
+        const at = a.btn.getBoundingClientRect().top;
+        const bt = b.btn.getBoundingClientRect().top;
+        return at - bt;
+      });
+
+      for (const item of allButtons) {
+        const { btn, role } = item;
+        if (role === "User") {
+          if (processedQueryButtons.has(btn)) continue;
+          processedQueryButtons.add(btn);
+          const text = (await clickVisibleButtonAndGetClipboard(btn))?.trim();
+          if (text) {
+            const hash = text.substring(0, 200) + text.substring(Math.max(0, text.length - 50)) + text.length + "|U";
+            if (!processedContent.has(hash)) {
+              processedContent.add(hash);
+              conversation.push({ role: "User", content: text });
+              processedSomething = true;
+            }
+          }
+        } else {
+          if (processedAnswerButtons.has(btn)) continue;
+          processedAnswerButtons.add(btn);
+          const raw = (await clickVisibleButtonAndGetClipboard(btn))?.trim();
+          if (raw) {
+            const hash = raw.substring(0, 200) + raw.substring(Math.max(0, raw.length - 50)) + raw.length;
+            if (!processedContent.has(hash)) {
+              processedContent.add(hash);
+              const processedMarkdown = processCopiedMarkdown(raw, citationStyle);
+              conversation.push({ role: "Assistant", content: processedMarkdown });
+              processedSomething = true;
+            }
+          }
+        }
+      }
+
+      // Expand any collapsed content every few steps if nothing was processed
+      if (!processedSomething) {
+        await clickExpandersOnce(6);
+      }
+
+      const beforeBottom = scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 2;
+      await pageDownOnce(scroller, scrollDelay, 0.9);
+      const afterBottom = scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 2;
+      if (beforeBottom && afterBottom && !processedSomething) {
+        stableBottomCount++;
+      } else {
+        stableBottomCount = 0;
+      }
+    }
+
+    return conversation;
+  }
+
+  // Method 2: Single-pass DOM scan (no button clicking)
+  async function extractByDomScanSinglePass(citationStyle) {
+    const processedContent = new Set();
+    const collected = [];
+
+    const scroller = getScrollRoot();
+    scroller.scrollTop = 0;
+    await new Promise((r) => setTimeout(r, 300));
+
+    let stableBottomCount = 0;
+    let scrollAttempt = 0;
+    const maxScrollAttempts = 300;
+    const scrollDelay = 500;
+
+    while (scrollAttempt < maxScrollAttempts && stableBottomCount < 5) {
+      scrollAttempt++;
+      const beforeCount = collected.length;
+
+      // Collect in DOM order for this viewport/state
+      const batch = collectDomMessagesInOrderOnce(citationStyle, processedContent);
+      if (batch.length > 0) {
+        for (const item of batch) {
+          collected.push(item);
+        }
+      } else {
+        // Try expanding collapsed sections and collect again
+        const expanded = await clickExpandersOnce(8);
+        if (expanded) {
+          const batch2 = collectDomMessagesInOrderOnce(citationStyle, processedContent);
+          if (batch2.length > 0) {
+            for (const item of batch2) collected.push(item);
+          }
+        }
+      }
+
+      // Detect bottom
+      const atBottom = scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 2;
+      await pageDownOnce(scroller, scrollDelay, 0.9);
+      const atBottomAfter = scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 2;
+
+      if (atBottom && atBottomAfter && collected.length === beforeCount) {
+        stableBottomCount++;
+      } else {
+        stableBottomCount = 0;
+      }
+    }
+
+    // Do not return to top; keep scroller where it ended
+    return collected;
+  }
+
+  // Helper for Method 2: collect messages in DOM order within a pass
+  function collectDomMessagesInOrderOnce(citationStyle, processedContent) {
+    const results = [];
+    const container = getThreadContainer();
+
+    const assistantSelector = ".prose.text-pretty.dark\\:prose-invert, [class*='prose'][class*='prose-invert']";
+    const userSelectors = [".whitespace-pre-line.text-pretty.break-words", ".group\\/query span[data-lexical-text='true']", "h1.group\\/query span[data-lexical-text='true']", "span[data-lexical-text='true']"];
+    const combined = `${assistantSelector}, ${userSelectors.join(", ")}`;
+
+    const nodes = container.querySelectorAll(combined);
+    nodes.forEach((node) => {
+      if (node.matches(assistantSelector)) {
+        const cloned = node.cloneNode(true);
+        const md = htmlToMarkdown(cloned.innerHTML, citationStyle).trim();
+        if (!md) return;
+        const hash = md.substring(0, 200) + md.substring(Math.max(0, md.length - 50)) + md.length;
+        if (processedContent.has(hash)) return;
+        processedContent.add(hash);
+        results.push({ role: "Assistant", content: md });
+      } else {
+        // User
+        const root = findUserMessageRootFromElement(node);
+        if (root.closest && (root.closest(".prose.text-pretty.dark\\:prose-invert") || root.closest("[class*='prose'][class*='prose-invert']"))) return;
+        // Aggregate query text from all lexical spans within the same root for stability
+        const spans = root.querySelectorAll("span[data-lexical-text='true']");
+        let text = "";
+        if (spans.length > 0) {
+          text = Array.from(spans)
+            .map((s) => (s.textContent || "").trim())
+            .join(" ")
+            .trim();
+        } else {
+          text = (node.textContent || "").trim();
+        }
+        if (!text || text.length < 2) return;
+        // Prefer nodes within a container that also has a copy-query button, but don't require it
+        const hasCopyQueryButton = !!(root.querySelector && (root.querySelector("button[data-testid='copy-query-button']") || root.querySelector("button[aria-label='Copy Query']")));
+        if (!hasCopyQueryButton && text.length < 10) return;
+        const hash = text.substring(0, 200) + text.substring(Math.max(0, text.length - 50)) + text.length + "|U";
+        if (processedContent.has(hash)) return;
+        processedContent.add(hash);
+        results.push({ role: "User", content: text });
+      }
+    });
+
+    return results;
+  }
+
+  // Method 3: Anchored copy button approach (more complex, uses scrollIntoView)
+  async function extractUsingCopyButtons(citationStyle) {
+    // Reset global citation tracking for this export
+    globalCitations.reset();
+
+    try {
+      // First try anchored, container-aware approach with preload + progressive scroll
+      const anchored = await processAnchoredButtonsWithProgressiveScroll(citationStyle);
+      if (anchored.length > 0) {
+        return anchored;
+      }
+
+      // Fallback: robust scroll-and-process (legacy)
+      return await scrollAndProcessButtons(citationStyle);
+    } catch (e) {
+      console.error("Copy button extraction failed:", e);
+      return [];
+    }
+  }
+
+  async function processAnchoredButtonsWithProgressiveScroll(citationStyle) {
+    const conversation = [];
+    const processedContent = new Set();
+    const processedButtons = new WeakSet();
+
+    await preloadPageFully();
+
+    // Start at top and progressively page down to handle virtualized lists
+    const scroller = getScrollRoot();
+    scroller.scrollTop = 0;
+    await new Promise((r) => setTimeout(r, 400));
+
+    let stableCount = 0;
+    let scrollAttempt = 0;
+    const maxScrollAttempts = 120;
+    const scrollDelay = 600;
+
+    while (scrollAttempt < maxScrollAttempts && stableCount < 5) {
+      scrollAttempt++;
+
+      const roots = collectAnchoredMessageRootsOnce();
+      let processedSomethingThisPass = false;
+
+      for (const item of roots) {
+        const { queryButton, responseButton } = item;
+
+        // Process query first
+        if (queryButton && !processedButtons.has(queryButton)) {
+          try {
+            const text = (await clickButtonAndGetClipboard(queryButton))?.trim();
+            if (text) {
+              const contentHash = text.substring(0, 200) + text.substring(Math.max(0, text.length - 50)) + text.length;
+              if (!processedContent.has(contentHash)) {
+                processedContent.add(contentHash);
+                conversation.push({ role: "User", content: text });
+                processedSomethingThisPass = true;
+              }
+            }
+          } catch (e) {
+            console.warn("Query copy failed:", e);
+          } finally {
+            processedButtons.add(queryButton);
+          }
+        }
+
+        // Then process response
+        if (responseButton && !processedButtons.has(responseButton)) {
+          try {
+            const raw = (await clickButtonAndGetClipboard(responseButton))?.trim();
+            if (raw) {
+              const contentHash = raw.substring(0, 200) + raw.substring(Math.max(0, raw.length - 50)) + raw.length;
+              if (!processedContent.has(contentHash)) {
+                processedContent.add(contentHash);
+                const processedMarkdown = processCopiedMarkdown(raw, citationStyle);
+                conversation.push({ role: "Assistant", content: processedMarkdown });
+                processedSomethingThisPass = true;
+              }
+            }
+          } catch (e) {
+            console.warn("Response copy failed:", e);
+          } finally {
+            processedButtons.add(responseButton);
+          }
+        }
+      }
+
+      if (!processedSomethingThisPass) {
+        stableCount++;
+      } else {
+        stableCount = 0;
+      }
+
+      // Page down and allow DOM to settle
+      await pageDownOnce(scroller, scrollDelay, 0.9);
+    }
+
+    // Try to catch any remaining at the end with a final full scan without scrolling
+    const finalRoots = collectAnchoredMessageRootsOnce();
+    for (const { queryButton, responseButton } of finalRoots) {
+      if (queryButton && !processedButtons.has(queryButton)) {
+        try {
+          const text = (await clickButtonAndGetClipboard(queryButton))?.trim();
+          if (text) {
+            const contentHash = text.substring(0, 200) + text.substring(Math.max(0, text.length - 50)) + text.length;
+            if (!processedContent.has(contentHash)) {
+              processedContent.add(contentHash);
+              conversation.push({ role: "User", content: text });
+            }
+          }
+        } catch {}
+      }
+      if (responseButton && !processedButtons.has(responseButton)) {
+        try {
+          const raw = (await clickButtonAndGetClipboard(responseButton))?.trim();
+          if (raw) {
+            const contentHash = raw.substring(0, 200) + raw.substring(Math.max(0, raw.length - 50)) + raw.length;
+            if (!processedContent.has(contentHash)) {
+              processedContent.add(contentHash);
+              const processedMarkdown = processCopiedMarkdown(raw, citationStyle);
+              conversation.push({ role: "Assistant", content: processedMarkdown });
+            }
+          }
+        } catch {}
+      }
+    }
+
+    // Return to top
+    scroller.scrollTop = 0;
+    await new Promise((r) => setTimeout(r, 300));
+
+    return conversation;
+  }
+
+  // Robustly scroll through page and process copy buttons as we find them
+  async function scrollAndProcessButtons(citationStyle) {
+    console.log("Starting robust scroll and process...");
+
+    const conversation = [];
+    const processedContent = new Set();
+    const processedButtons = new Set();
+
+    // Ensure document stays focused
+    window.focus();
+
+    // Start from top
+    const scroller = getScrollRoot();
+    scroller.scrollTop = 0;
+    await new Promise((resolve) => setTimeout(resolve, 500));
+
+    let stableCount = 0;
+    let scrollAttempt = 0;
+    let lastButtonCount = 0;
+    const maxScrollAttempts = 100; // Increase max attempts
+    const scrollDelay = 600; // delay between page downs
+
+    while (scrollAttempt < maxScrollAttempts && stableCount < 5) {
+      scrollAttempt++;
+
+      // Count current buttons before processing
+      const currentButtonCount = document.querySelectorAll('button[data-testid="copy-query-button"], button[aria-label="Copy Query"], button[aria-label="Copy"]').length;
+
+      console.log(`Page Down attempt ${scrollAttempt}: buttons=${currentButtonCount}`);
+
+      // Find and process visible copy buttons at current position
+      await processVisibleButtons();
+
+      // Track button count changes
+      if (currentButtonCount > lastButtonCount) {
+        console.log(`Button count increased from ${lastButtonCount} to ${currentButtonCount}`);
+        lastButtonCount = currentButtonCount;
+        stableCount = 0; // Reset stability when new buttons found
+      } else {
+        stableCount++;
+        console.log(`Button count stable at ${currentButtonCount} (stability: ${stableCount}/5)`);
+      }
+
+      // Page down the actual scroller
+      await pageDownOnce(scroller, scrollDelay, 0.9);
+    }
+
+    console.log(`Scroll complete after ${scrollAttempt} attempts. Found ${conversation.length} conversation items`);
+
+    // Return to top
+    scroller.scrollTop = 0;
+    await new Promise((resolve) => setTimeout(resolve, 500));
+
+    return conversation;
+
+    // Helper function to process visible buttons at current scroll position
+    async function processVisibleButtons() {
+      const allButtons = document.querySelectorAll("button");
+      const copyButtons = [];
+
+      allButtons.forEach((btn) => {
+        if (processedButtons.has(btn)) return;
+
+        // Exclude code block copy buttons
+        const testId = btn.getAttribute("data-testid");
+        const ariaLower = (btn.getAttribute("aria-label") || "").toLowerCase();
+        if (testId === "copy-code-button" || testId === "copy-code" || testId?.includes("copy-code") || ariaLower.includes("copy code") || btn.closest("pre") || btn.closest("code")) {
+          return;
+        }
+
+        // Only include conversation copy buttons
+        const isQueryCopyButton = testId === "copy-query-button" || btn.getAttribute("aria-label") === "Copy Query";
+        const isResponseCopyButton = btn.getAttribute("aria-label") === "Copy" && btn.querySelector("svg.tabler-icon-copy");
+
+        if (isQueryCopyButton) {
+          copyButtons.push({ el: btn, role: "User" });
+        } else if (isResponseCopyButton) {
+          copyButtons.push({ el: btn, role: "Assistant" });
+        }
+      });
+
+      // Sort by vertical position
+      copyButtons.sort((a, b) => {
+        const aTop = a.el.getBoundingClientRect().top + window.scrollY;
+        const bTop = b.el.getBoundingClientRect().top + window.scrollY;
+        return aTop - bTop;
+      });
+
+      console.log(`Found ${copyButtons.length} copy buttons in DOM`);
+
+      // Process each copy button (don't filter by viewport visibility)
+      for (const { el: button, role } of copyButtons) {
+        if (processedButtons.has(button)) continue;
+
+        try {
+          processedButtons.add(button);
+
+          // Ensure window stays focused
+          window.focus();
+
+          // Scroll button into view and center it
+          button.scrollIntoView({
+            behavior: "smooth",
+            block: "center",
+            inline: "center",
+          });
+          await new Promise((resolve) => setTimeout(resolve, 300));
+
+          // Click button
+          button.focus();
+          button.click();
+
+          // Wait for clipboard
+          await new Promise((resolve) => setTimeout(resolve, 500));
+          window.focus();
+
+          const clipboardText = await navigator.clipboard.readText();
+
+          if (clipboardText && clipboardText.trim().length > 0) {
+            // Check for duplicates
+            const trimmedContent = clipboardText.trim();
+            const contentHash = trimmedContent.substring(0, 200) + trimmedContent.substring(Math.max(0, trimmedContent.length - 50)) + trimmedContent.length;
+
+            if (processedContent.has(contentHash)) {
+              console.log(`Skipping duplicate content (${clipboardText.length} chars)`);
+              continue;
+            }
+
+            processedContent.add(contentHash);
+
+            if (role === "User") {
+              conversation.push({
+                role: "User",
+                content: trimmedContent,
+              });
+            } else {
+              const processedMarkdown = processCopiedMarkdown(clipboardText, citationStyle);
+              conversation.push({
+                role: "Assistant",
+                content: processedMarkdown,
+              });
+            }
+          }
+        } catch (e) {
+          console.error(`Failed to copy from button:`, e);
+        }
+      }
+    }
+  }
+
+  // MAIN EXTRACTION ORCHESTRATOR
+  async function extractConversation(citationStyle) {
+    // Reset global citation tracking
+    globalCitations.reset();
+
+    // Method 1: Page-down with button clicking (most reliable)
+    // Uses Perplexity's native copy buttons to extract exact content
+    console.log("Trying Method 1: Page-down with button clicking...");
+    const viaButtons = await extractByPageDownClickButtons(citationStyle);
+    console.log(`Method 1 found ${viaButtons.length} items`);
+    if (viaButtons.length >= 2) {
+      // At least 1 complete turn (User + Assistant)
+      console.log("✅ Using Method 1: Button clicking extraction");
+      return viaButtons;
+    }
+
+    // Method 2: Single-pass DOM scan (no button clicking)
+    // Directly reads DOM content while scrolling
+    console.log("Trying Method 2: Single-pass DOM scan...");
+    const domSingle = await extractByDomScanSinglePass(citationStyle);
+    console.log(`Method 2 found ${domSingle.length} items`);
+    if (domSingle.length >= 2) {
+      // At least 1 complete turn (User + Assistant)
+      console.log("✅ Using Method 2: DOM scan extraction");
+      return domSingle;
+    }
+
+    // Method 3: Anchored copy button approach (legacy)
+    // Falls back to older button-based extraction
+    console.log("Trying Method 3: Anchored copy button approach...");
+    const copyButtonApproach = await extractUsingCopyButtons(citationStyle);
+    console.log(`Method 3 found ${copyButtonApproach.length} items`);
+    if (copyButtonApproach.length >= 2) {
+      // At least 1 complete turn (User + Assistant)
+      console.log("✅ Using Method 3: Anchored button extraction");
+      return copyButtonApproach;
+    }
+
+    // Method 4: Direct DOM parsing (final fallback)
+    // Parses visible DOM elements without any scrolling
+    console.log("Trying Method 4: Direct DOM parsing fallback...");
+    const conversation = [];
+    const seenUserQueries = new Set();
+
+    // Find the main thread container
+    const threadContainer = document.querySelector('.max-w-threadContentWidth, [class*="threadContentWidth"]');
+
+    if (threadContainer) {
+      // Get ALL divs in the thread container, process them in document order
+      const allDivs = threadContainer.querySelectorAll("div");
+
+      allDivs.forEach((div) => {
+        // Check if this div contains a user query (multiple possible structures)
+        const userQuerySelectors = [
+          ".whitespace-pre-line.text-pretty.break-words", // Original working selector
+          "span[data-lexical-text='true']", // New structure selector
+          ".group\\/query span[data-lexical-text='true']", // Grouped queries
+          "h1.group\\/query span[data-lexical-text='true']", // H1 queries
+        ];
+
+        let foundUserQuery = false;
+        for (const selector of userQuerySelectors) {
+          const userQuery = div.querySelector(selector);
+          if (userQuery) {
+            const content = userQuery.textContent.trim();
+            if (content && content.length > 10 && !seenUserQueries.has(content)) {
+              seenUserQueries.add(content);
+              conversation.push({
+                role: "User",
+                content: content,
+              });
+              foundUserQuery = true;
+              break; // Stop looking once we find a query in this div
+            }
+          }
+        }
+
+        // If no user query found in this div, check for assistant response
+        if (!foundUserQuery) {
+          const assistantResponse = div.querySelector(".prose.text-pretty.dark\\:prose-invert");
+          if (assistantResponse) {
+            const answerContent = assistantResponse.cloneNode(true);
+            conversation.push({
+              role: "Assistant",
+              content: htmlToMarkdown(answerContent.innerHTML, citationStyle),
+            });
+          }
+        }
+      });
+    }
+
+    // Fallback: if we didn't find conversations, try the simple original method
+    if (conversation.length === 0) {
+      // Just get user queries and assistant responses in document order
+      document.querySelectorAll(".whitespace-pre-line.text-pretty.break-words, span[data-lexical-text='true'], .prose.text-pretty.dark\\:prose-invert").forEach((element) => {
+        if (element.matches(".prose.text-pretty.dark\\:prose-invert")) {
+          // Assistant response
+          const answerContent = element.cloneNode(true);
+          conversation.push({
+            role: "Assistant",
+            content: htmlToMarkdown(answerContent.innerHTML, citationStyle),
+          });
+        } else {
+          // User query
+          const content = element.textContent.trim();
+          if (content && content.length > 10 && !seenUserQueries.has(content)) {
+            seenUserQueries.add(content);
+            conversation.push({
+              role: "User",
+              content: content,
+            });
+          }
+        }
+      });
+    }
+
+    console.log(`Method 4 found ${conversation.length} items`);
+    if (conversation.length > 0) {
+      console.log("✅ Using Method 4: Direct DOM parsing");
+    } else {
+      console.log("❌ No content found with any method");
+    }
+    return conversation;
+  }
+
+  // ============================================================================
+  // MARKDOWN PROCESSING FUNCTIONS
+  // ============================================================================
+
+  // Process copied markdown and convert citations to desired style with global consolidation
+  function processCopiedMarkdown(markdown, citationStyle) {
+    // The copied format already has [N] citations and numbered URL references at bottom
+
+    // Extract the numbered references section (at bottom of each response)
+    const referenceMatches = markdown.match(/\[(\d+)\]\(([^)]+)\)/g) || [];
+    const localReferences = new Map(); // local number -> URL
+
+    // Also extract plain numbered references like "1 https://example.com"
+    const plainRefs = markdown.match(/^\s*(\d+)\s+(https?:\/\/[^\s\n]+)/gm) || [];
+    plainRefs.forEach((ref) => {
+      const match = ref.match(/(\d+)\s+(https?:\/\/[^\s\n]+)/);
+      if (match) {
+        localReferences.set(match[1], match[2]);
+      }
+    });
+
+    // Extract from [N](url) format citations
+    referenceMatches.forEach((ref) => {
+      const match = ref.match(/\[(\d+)\]\(([^)]+)\)/);
+      if (match) {
+        localReferences.set(match[1], match[2]);
+      }
+    });
+
+    // Remove the plain numbered references section and [N](url) citation blocks from the main content
+    let content = markdown
+      .replace(/^\s*\d+\s+https?:\/\/[^\s\n]+$/gm, "") // Remove "1 https://example.com" lines
+      .replace(/^\s*\[(\d+)\]\([^)]+\)$/gm, "") // Remove "[1](https://example.com)" lines
+      .replace(/\n{3,}/g, "\n\n"); // Clean up extra newlines left behind
+
+    // Create mapping from local citation numbers to global numbers
+    const localToGlobalMap = new Map();
+
+    // Build the mapping by processing all found references
+    localReferences.forEach((url, localNum) => {
+      const globalNum = globalCitations.addCitation(url);
+      localToGlobalMap.set(localNum, globalNum);
+    });
+
+    // Replace citations in the content based on the desired style
+    // Sort by localNum in descending order to avoid replacement interference (e.g., [10] before [1])
+    const sortedEntries = Array.from(localToGlobalMap.entries()).sort((a, b) => {
+      const numA = parseInt(a[0]);
+      const numB = parseInt(b[0]);
+      return numB - numA; // Sort in descending order
+    });
+
+    sortedEntries.forEach(([localNum, globalNum]) => {
+      if (citationStyle === CITATION_STYLES.ENDNOTES) {
+        // Replace [N](url) with [globalN] and [N] with [globalN]
+        const linkRegex = new RegExp(`\\[${localNum}\\]\\([^)]+\\)`, "g");
+        const plainRegex = new RegExp(`\\[${localNum}\\](?!\\()`, "g");
+        content = content.replace(linkRegex, `[${globalNum}]`);
+        content = content.replace(plainRegex, `[${globalNum}]`);
+      } else if (citationStyle === CITATION_STYLES.INLINE) {
+        // Replace [N] with [globalN](url) and keep [N](url) as [globalN](url)
+        const url = localReferences.get(localNum);
+        const linkRegex = new RegExp(`\\[${localNum}\\]\\([^)]+\\)`, "g");
+        const plainRegex = new RegExp(`\\[${localNum}\\](?!\\()`, "g");
+        content = content.replace(linkRegex, `[${globalNum}](${url})`);
+        content = content.replace(plainRegex, `[${globalNum}](${url})`);
+      } else if (citationStyle === CITATION_STYLES.PARENTHESIZED) {
+        // Replace with ([globalN](url))
+        const url = localReferences.get(localNum);
+        const linkRegex = new RegExp(`\\[${localNum}\\]\\([^)]+\\)`, "g");
+        const plainRegex = new RegExp(`\\[${localNum}\\](?!\\()`, "g");
+        content = content.replace(linkRegex, `([${globalNum}](${url}))`);
+        content = content.replace(plainRegex, `([${globalNum}](${url}))`);
+      } else if (citationStyle === CITATION_STYLES.NAMED) {
+        // Replace with ([domain](url))
+        const url = localReferences.get(localNum);
+        const domain = extractDomainName(url) || "source";
+        const linkRegex = new RegExp(`\\[${localNum}\\]\\([^)]+\\)`, "g");
+        const plainRegex = new RegExp(`\\[${localNum}\\](?!\\()`, "g");
+        content = content.replace(linkRegex, `([${domain}](${url}))`);
+        content = content.replace(plainRegex, `([${domain}](${url}))`);
+      }
+    });
+
+    // Citations processed and remapped to global numbers
+
+    // Clean up any extra parentheses that might have been created
+    content = content.replace(/\)\)\)/g, "))"); // Fix triple parentheses
+    content = content.replace(/\(\(\(/g, "(("); // Fix triple opening parentheses
+
+    // Ensure content ends with single newline and clean up extra whitespace
+    content = content.trim();
+
+    return content;
+  }
 
   // Convert HTML content to markdown
   function htmlToMarkdown(html, citationStyle = CITATION_STYLES.PARENTHESIZED) {
@@ -85,31 +1180,147 @@
       }
     });
 
-    // Process citations
-    const citations = [...tempDiv.querySelectorAll("a.citation")];
-    const citationRefs = new Map();
+    // Process citations - updated for new structure with proper URL-based tracking
+    const citations = [
+      ...tempDiv.querySelectorAll("a.citation"), // Old structure
+      ...tempDiv.querySelectorAll(".citation.inline"), // New structure
+    ];
+
+    // Track unique sources by normalized URL
+    const urlToNumber = new Map(); // normalized URL -> citation number
+    const citationRefs = new Map(); // citation number -> {href, sourceName, normalizedUrl, multipleUrls}
+    let nextCitationNumber = 1;
+
+    // Process citations synchronously first, then handle multi-citations
     citations.forEach((citation) => {
-      // Find the inner <span> holding the citation number
-      const numberSpan = citation.querySelector("span span");
-      const number = numberSpan ? numberSpan.textContent.trim() : null;
-      const href = citation.getAttribute("href");
-      if (number && href) {
-        citationRefs.set(number, { href });
+      let href = null;
+      let sourceName = null;
+      let isMultiCitation = false;
+
+      // Handle old structure (a.citation)
+      if (citation.tagName === "A" && citation.classList.contains("citation")) {
+        href = citation.getAttribute("href");
+      }
+      // Handle new structure (.citation.inline)
+      else if (citation.classList.contains("citation") && citation.classList.contains("inline")) {
+        // Get source name from aria-label or nested text
+        const ariaLabel = citation.getAttribute("aria-label");
+        if (ariaLabel) {
+          sourceName = extractSourceName(ariaLabel);
+        }
+
+        // If no source name from aria-label, try to find it in nested elements
+        if (!sourceName) {
+          const numberSpan = citation.querySelector('.text-3xs, [class*="text-3xs"]');
+          if (numberSpan) {
+            const spanText = numberSpan.textContent;
+            sourceName = extractSourceName(spanText);
+
+            // Check if this is a multi-citation (has +N format)
+            isMultiCitation = /\+\d+$/.test(spanText.trim());
+          }
+        }
+
+        // Get href from nested anchor
+        const nestedAnchor = citation.querySelector("a[href]");
+        href = nestedAnchor ? nestedAnchor.getAttribute("href") : null;
+
+        // For multi-citations, we'll process them later to avoid blocking
+        if (isMultiCitation) {
+          citation.setAttribute("data-is-multi-citation", "true");
+        }
+      }
+
+      if (href) {
+        const normalizedUrl = normalizeUrl(href);
+
+        // Check if we've seen this URL before
+        if (!urlToNumber.has(normalizedUrl)) {
+          // New URL - assign next available number
+          urlToNumber.set(normalizedUrl, nextCitationNumber);
+          citationRefs.set(nextCitationNumber, {
+            href,
+            sourceName,
+            normalizedUrl,
+            isMultiCitation,
+          });
+          nextCitationNumber++;
+        }
+        // If we've seen this URL before, we'll reuse the existing number
       }
     });
 
-    // Clean up citations based on style
+    // Clean up citations based on style using URL-based numbering
     tempDiv.querySelectorAll(".citation").forEach((el) => {
-      const numberSpan = el.querySelector("span span");
-      const number = numberSpan ? numberSpan.textContent.trim() : null;
-      const href = el.getAttribute("href");
+      let href = null;
+      let sourceName = null;
+      let isMultiCitation = false;
 
-      if (citationStyle === CITATION_STYLES.INLINE) {
-        el.replaceWith(` [${number}](${href}) `);
-      } else if (citationStyle === CITATION_STYLES.PARENTHESIZED) {
-        el.replaceWith(` ([${number}](${href})) `);
+      // Handle old structure (a.citation)
+      if (el.tagName === "A" && el.classList.contains("citation")) {
+        href = el.getAttribute("href");
+      }
+      // Handle new structure (.citation.inline)
+      else if (el.classList.contains("citation") && el.classList.contains("inline")) {
+        // Get source name from aria-label or nested text
+        const ariaLabel = el.getAttribute("aria-label");
+        if (ariaLabel) {
+          sourceName = extractSourceName(ariaLabel);
+        }
+
+        if (!sourceName) {
+          const numberSpan = el.querySelector('.text-3xs, [class*="text-3xs"]');
+          if (numberSpan) {
+            const spanText = numberSpan.textContent;
+            sourceName = extractSourceName(spanText);
+            isMultiCitation = /\+\d+$/.test(spanText.trim());
+          }
+        }
+
+        // Get href from nested anchor
+        const nestedAnchor = el.querySelector("a[href]");
+        href = nestedAnchor ? nestedAnchor.getAttribute("href") : null;
+      }
+
+      if (href) {
+        const normalizedUrl = normalizeUrl(href);
+        const number = urlToNumber.get(normalizedUrl);
+
+        if (number) {
+          // For multi-citations, we'll show a note about multiple sources
+          let citationText = "";
+          let citationUrl = href;
+
+          if (isMultiCitation) {
+            // Extract the count from the +N format
+            const numberSpan = el.querySelector('.text-3xs, [class*="text-3xs"]');
+            const countMatch = numberSpan ? numberSpan.textContent.match(/\+(\d+)$/) : null;
+            const count = countMatch ? parseInt(countMatch[1]) : 2;
+
+            if (citationStyle === CITATION_STYLES.NAMED && sourceName) {
+              citationText = ` [${sourceName} +${count} more](${citationUrl}) `;
+            } else {
+              citationText = ` [${number} +${count} more](${citationUrl}) `;
+            }
+          } else {
+            // Single citation - use normal format
+            if (citationStyle === CITATION_STYLES.INLINE) {
+              citationText = ` [${number}](${citationUrl}) `;
+            } else if (citationStyle === CITATION_STYLES.PARENTHESIZED) {
+              citationText = ` ([${number}](${citationUrl})) `;
+            } else if (citationStyle === CITATION_STYLES.NAMED && sourceName) {
+              citationText = ` [${sourceName}](${citationUrl}) `;
+            } else {
+              citationText = ` [${number}] `;
+            }
+          }
+
+          el.replaceWith(citationText);
+        } else {
+          // Fallback if we can't find the number
+        }
       } else {
-        el.replaceWith(` [${number}] `);
+        // Fallback if we can't parse properly
       }
     });
 
@@ -124,12 +1335,24 @@
       .replace(/<h4[^>]*>([\s\S]*?)<\/h4>/g, "#### $1")
       .replace(/<h5[^>]*>([\s\S]*?)<\/h5>/g, "##### $1")
       .replace(/<h6[^>]*>([\s\S]*?)<\/h6>/g, "###### $1")
-      .replace(/<p[^>]*>([\s\S]*?)<\/p>/g, "$1\n")
-      .replace(/<br\s*\/?>/g, "\n")
+      .replace(/<p[^>]*>([\s\S]*?)<\/p>/g, (_, content) => {
+        const prefs = getPreferences();
+        return prefs.addExtraNewlines ? `${content}\n\n` : `${content}\n`;
+      })
+      .replace(/<br\s*\/?>(?!\n)/g, () => {
+        const prefs = getPreferences();
+        return prefs.addExtraNewlines ? "\n\n" : "\n";
+      })
       .replace(/<strong>([\s\S]*?)<\/strong>/g, "**$1**")
       .replace(/<em>([\s\S]*?)<\/em>/g, "*$1*")
-      .replace(/<ul[^>]*>([\s\S]*?)<\/ul>/g, "$1\n")
-      .replace(/<li[^>]*>([\s\S]*?)<\/li>/g, " - $1\n");
+      .replace(/<ul[^>]*>([\s\S]*?)<\/ul>/g, (_, content) => {
+        const prefs = getPreferences();
+        return prefs.addExtraNewlines ? `${content}\n\n` : `${content}\n`;
+      })
+      .replace(/<li[^>]*>([\s\S]*?)<\/li>/g, (_, content) => {
+        const prefs = getPreferences();
+        return prefs.addExtraNewlines ? ` - ${content}\n\n` : ` - ${content}\n`;
+      });
 
     // Handle tables before removing remaining HTML
     text = text.replace(/<table[^>]*>([\s\S]*?)<\/table>/g, (match) => {
@@ -174,16 +1397,16 @@
     // Clean up whitespace
     // Convert bold text at start of line to h3 headers, but not if inside a list item
     text = text.replace(/^(\s*)\*\*([^*\n]+)\*\*(?!.*\n\s*-)/gm, "$1### $2");
-    
+
     // This fixes list items where the entire text was incorrectly converted to headers
     // We need to preserve both partial bold items and fully bold items
-    text = text.replace(/^(\s*-\s+)###\s+([^\n]+)/gm, function(match, listPrefix, content) {
+    text = text.replace(/^(\s*-\s+)###\s+([^\n]+)/gm, function (_, listPrefix, content) {
       // Check if the content contains bold markers
       if (content.includes("**")) {
         // If it already has bold markers, just remove the ### and keep the rest intact
         return `${listPrefix}${content}`;
       } else {
-        // If it doesn't have bold markers (because it was fully bold before), 
+        // If it doesn't have bold markers (because it was fully bold before),
         // add them back (this was incorrectly converted to a header)
         return `${listPrefix}**${content}**`;
       }
@@ -194,14 +1417,14 @@
 
     // Ensure headers have proper spacing
     text = text.replace(/([^\n])(\n#{1,3} )/g, "$1\n\n$2");
-    
+
     // Fix unbalanced or misplaced bold markers in list items
     text = text.replace(/^(\s*-\s+.*?)(\s\*\*\s*)$/gm, "$1"); // Remove trailing ** with space before
-    
+
     // Fix citation and bold issues - make sure citations aren't wrapped in bold
     text = text.replace(/\*\*([^*]+)(\[[0-9]+\]\([^)]+\))\s*\*\*/g, "**$1**$2");
     text = text.replace(/\*\*([^*]+)(\(\[[0-9]+\]\([^)]+\)\))\s*\*\*/g, "**$1**$2");
-    
+
     // Fix cases where a line ends with an extra bold marker after a citation
     text = text.replace(/(\[[0-9]+\]\([^)]+\))\s*\*\*/g, "$1");
     text = text.replace(/(\(\[[0-9]+\]\([^)]+\)\))\s*\*\*/g, "$1");
@@ -244,75 +1467,52 @@
 
     conversations.forEach((conv, index) => {
       if (conv.role === "Assistant") {
-        if (prefs.formatStyle === FORMAT_STYLES.FULL) {
-          markdown += `**${conv.role}:** ${conv.content}\n\n`; // Add newline after content
+        // Ensure assistant content ends with single newline
+        let cleanContent = conv.content.trim();
+
+        // Check if content starts with a header and fix formatting
+        if (cleanContent.match(/^#+ /)) {
+          // Content starts with a header - ensure role is on separate line
+          if (prefs.formatStyle === FORMAT_STYLES.FULL) {
+            markdown += `**${conv.role}:**\n\n${cleanContent}\n\n`;
+          } else {
+            markdown += `${cleanContent}\n\n`;
+          }
         } else {
-          markdown += `${conv.content}\n\n`; // Add newline after content
+          // Normal content formatting
+          if (prefs.formatStyle === FORMAT_STYLES.FULL) {
+            markdown += `**${conv.role}:** ${cleanContent}\n\n`;
+          } else {
+            markdown += `${cleanContent}\n\n`;
+          }
         }
 
         // Add divider only between assistant responses, not after the last one
         const nextAssistant = conversations.slice(index + 1).find((c) => c.role === "Assistant");
         if (nextAssistant) {
-          markdown += "---\n\n"; // Add newline after divider
+          markdown += "---\n\n";
         }
       } else if (conv.role === "User" && prefs.formatStyle === FORMAT_STYLES.FULL) {
-        markdown += `**${conv.role}:** ${conv.content}\n\n`; // Add newline after content
-        markdown += "---\n\n"; // Add newline after divider
+        markdown += `**${conv.role}:** ${conv.content.trim()}\n\n`;
+        markdown += "---\n\n";
       }
     });
+
+    // Add global citations at the end for endnotes style
+    if (prefs.citationStyle === CITATION_STYLES.ENDNOTES && globalCitations.citationRefs.size > 0) {
+      markdown += "\n\n### Sources\n";
+      for (const [number, { href }] of globalCitations.citationRefs) {
+        markdown += `\n[${number}] ${href}`;
+      }
+      markdown += "\n"; // Add final newline
+    }
 
     return markdown.trim(); // Trim any trailing whitespace at the very end
   }
 
-  // Extract conversation content
-  function extractConversation(citationStyle) {
-    const conversation = [];
-    console.log("Using updated selectors for Perplexity");
-    
-    // Check for user query
-    const userQueries = document.querySelectorAll(".whitespace-pre-line.text-pretty.break-words");
-    userQueries.forEach(query => {
-      conversation.push({
-        role: "User",
-        content: query.textContent.trim(),
-      });
-    });
-
-    // Check for assistant responses
-    const assistantResponses = document.querySelectorAll(".prose.text-pretty.dark\\:prose-invert");
-    assistantResponses.forEach(response => {
-      const answerContent = response.cloneNode(true);
-      conversation.push({
-        role: "Assistant",
-        content: htmlToMarkdown(answerContent.innerHTML, citationStyle),
-      });
-    });
-
-    // Fallback to more generic selectors if needed
-    if (conversation.length === 0) {
-      console.log("Attempting to use fallback selectors");
-      
-      // Try more generic selectors that might match Perplexity's structure
-      const queryElements = document.querySelectorAll("[class*='whitespace-pre-line'][class*='break-words']");
-      queryElements.forEach(query => {
-        conversation.push({
-          role: "User",
-          content: query.textContent.trim(),
-        });
-      });
-
-      const responseElements = document.querySelectorAll("[class*='prose'][class*='prose-invert']");
-      responseElements.forEach(response => {
-        const answerContent = response.cloneNode(true);
-        conversation.push({
-          role: "Assistant",
-          content: htmlToMarkdown(answerContent.innerHTML, citationStyle),
-        });
-      });
-    }
-
-    return conversation;
-  }
+  // ============================================================================
+  // UI FUNCTIONS
+  // ============================================================================
 
   // Download markdown file
   function downloadMarkdown(content, filename) {
@@ -336,49 +1536,201 @@
 
     const button = document.createElement("button");
     button.id = "perplexity-export-btn";
-    button.textContent = "Export as Markdown";
+    button.textContent = "Save as Markdown";
+
+    // Position button relative to main content area
+    const positionButton = () => {
+      // Multiple strategies to find the main content area
+
+      // Strategy 1: Find the thread content container
+      let mainContainer = document.querySelector(".max-w-threadContentWidth") || document.querySelector('[class*="threadContentWidth"]');
+
+      // Strategy 2: Find the input area's parent container
+      if (!mainContainer) {
+        const inputArea = document.querySelector("textarea[placeholder]") || document.querySelector('[role="textbox"]') || document.querySelector("form");
+        if (inputArea) {
+          // Walk up to find a container with reasonable width
+          let parent = inputArea.parentElement;
+          while (parent && parent !== document.body) {
+            const width = parent.getBoundingClientRect().width;
+            // Look for a container that's likely the main content (not full width, not too narrow)
+            if (width > 400 && width < window.innerWidth * 0.8) {
+              mainContainer = parent;
+              break;
+            }
+            parent = parent.parentElement;
+          }
+        }
+      }
+
+      // Strategy 3: Find main element
+      if (!mainContainer) {
+        mainContainer = document.querySelector("main") || document.querySelector('[role="main"]') || document.querySelector('[class*="main-content"]');
+      }
+
+      if (mainContainer) {
+        const rect = mainContainer.getBoundingClientRect();
+
+        // Calculate center and apply directly without transition
+        const centerX = rect.left + rect.width / 2;
+
+        // Force immediate positioning update by removing and re-adding styles
+        button.style.transition = "none";
+        button.style.left = `${centerX}px`;
+        button.style.transform = "translateX(-50%)";
+
+        // Re-enable transition after a moment
+        requestAnimationFrame(() => {
+          button.style.transition = "background-color 0.2s, left 0.2s";
+        });
+
+        // Debug positioning
+        console.log("Button positioned at:", centerX, "Container width:", rect.width, "Container left:", rect.left);
+      } else {
+        // Fallback to viewport center
+        button.style.transition = "none";
+        button.style.left = "50%";
+        button.style.transform = "translateX(-50%)";
+        requestAnimationFrame(() => {
+          button.style.transition = "background-color 0.2s, left 0.2s";
+        });
+      }
+    };
+
     button.style.cssText = `
             position: fixed;
-            bottom: 20px;
-            right: 80px;
-            padding: 8px 16px;
-            background-color: #6366f1;
-            color: white;
+            bottom: 40px;
+            left: 50%;
+            transform: translateX(-50%);
+            padding: 4px 8px;
+            background-color: #30b8c6;
+            color: black;
             border: none;
             border-radius: 8px;
             cursor: pointer;
-            font-size: 14px;
+            font-size: 12px;
             z-index: 99999;
-            font-family: system-ui, -apple-system, sans-serif;
-            transition: background-color 0.2s;
+            font-weight: 600;
+            transition: background-color 0.2s, left 0.2s;
             box-shadow: 0 2px 4px rgba(0,0,0,0.1);
         `;
 
+    // Position initially and on resize - use immediate execution
+    positionButton();
+
+    // Multiple event listeners for maximum responsiveness
+    window.addEventListener("resize", () => {
+      console.log("Window resize detected");
+      positionButton();
+    });
+
+    window.addEventListener("orientationchange", () => {
+      console.log("Orientation change detected");
+      setTimeout(positionButton, 100);
+    });
+
+    // Watch for sidebar changes and layout updates with more aggressive observation
+    const observer = new MutationObserver((mutations) => {
+      console.log("DOM mutation detected:", mutations.length, "mutations");
+      positionButton();
+    });
+
+    // Observe body and html for any class/style changes
+    observer.observe(document.body, {
+      attributes: true,
+      attributeFilter: ["class", "style"],
+      subtree: false,
+    });
+
+    observer.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ["class", "style"],
+      subtree: false,
+    });
+
+    // Use ResizeObserver on everything that could affect layout
+    if (typeof ResizeObserver !== "undefined") {
+      const resizeObserver = new ResizeObserver((entries) => {
+        console.log("ResizeObserver triggered for", entries.length, "elements");
+        positionButton();
+      });
+
+      // Observe multiple elements immediately
+      resizeObserver.observe(document.body);
+      resizeObserver.observe(document.documentElement);
+
+      // Also observe any main containers we can find right now
+      const containers = [document.querySelector(".max-w-threadContentWidth"), document.querySelector('[class*="threadContentWidth"]'), document.querySelector("main"), document.querySelector('[role="main"]')].filter(Boolean);
+
+      containers.forEach((container) => {
+        console.log("Observing container:", container);
+        resizeObserver.observe(container);
+        if (container.parentElement) {
+          resizeObserver.observe(container.parentElement);
+        }
+      });
+    }
+
+    // Also set up a periodic check as ultimate fallback
+    setInterval(() => {
+      const currentLeft = parseFloat(button.style.left) || 0;
+      const rect = (document.querySelector(".max-w-threadContentWidth") || document.querySelector('[class*="threadContentWidth"]') || document.querySelector("main"))?.getBoundingClientRect();
+
+      if (rect) {
+        const expectedX = rect.left + rect.width / 2;
+        // If button position is significantly off, reposition
+        if (Math.abs(currentLeft - expectedX) > 20) {
+          console.log("Periodic check: repositioning button from", currentLeft, "to", expectedX);
+          positionButton();
+        }
+      }
+    }, 2000); // Check every 2 seconds
+
     button.addEventListener("mouseenter", () => {
-      button.style.backgroundColor = "#4f46e5";
+      button.style.backgroundColor = "#30b8c6";
     });
 
     button.addEventListener("mouseleave", () => {
-      button.style.backgroundColor = "#6366f1";
+      button.style.backgroundColor = "#30b8c6";
     });
 
-    button.addEventListener("click", () => {
-      const prefs = getPreferences();
-      const conversation = extractConversation(prefs.citationStyle);
-      if (conversation.length === 0) {
-        alert("No conversation content found to export.");
-        return;
+    button.addEventListener("click", async () => {
+      // Show loading state
+      const originalText = button.textContent;
+      button.textContent = "Exporting...";
+      button.disabled = true;
+
+      try {
+        // Ensure window is focused before starting
+        window.focus();
+
+        // Give user a moment to ensure focus
+        await new Promise((resolve) => setTimeout(resolve, 500));
+
+        const prefs = getPreferences();
+        const conversation = await extractConversation(prefs.citationStyle);
+        if (conversation.length === 0) {
+          alert("No conversation content found to export.");
+          return;
+        }
+
+        const title = document.title.replace(" | Perplexity", "").trim();
+        const safeTitle = title
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, " ")
+          .replace(/^-+|-+$/g, "");
+        const filename = `${safeTitle}.md`;
+
+        const markdown = formatMarkdown(conversation);
+        downloadMarkdown(markdown, filename);
+      } catch (error) {
+        console.error("Export failed:", error);
+        alert("Export failed. Please try again.");
+      } finally {
+        // Restore button state
+        button.textContent = originalText;
+        button.disabled = false;
       }
-
-      const title = document.title.replace(" | Perplexity", "").trim();
-      const safeTitle = title
-        .toLowerCase()
-        .replace(/[^a-z0-9]+/g, " ")
-        .replace(/^-+|-+$/g, "");
-      const filename = `${safeTitle}.md`;
-
-      const markdown = formatMarkdown(conversation);
-      downloadMarkdown(markdown, filename);
     });
 
     document.body.appendChild(button);
@@ -387,9 +1739,7 @@
   // Initialize the script
   function init() {
     const observer = new MutationObserver(() => {
-      if ((document.querySelector(".prose.text-pretty.dark\\:prose-invert") ||
-           document.querySelector("[class*='prose'][class*='prose-invert']")) && 
-          !document.getElementById("perplexity-export-btn")) {
+      if ((document.querySelector(".prose.text-pretty.dark\\:prose-invert") || document.querySelector("[class*='prose'][class*='prose-invert']") || document.querySelector("span[data-lexical-text='true']")) && !document.getElementById("perplexity-export-btn")) {
         addExportButton();
       }
     });
@@ -399,8 +1749,7 @@
       subtree: true,
     });
 
-    if (document.querySelector(".prose.text-pretty.dark\\:prose-invert") ||
-        document.querySelector("[class*='prose'][class*='prose-invert']")) {
+    if (document.querySelector(".prose.text-pretty.dark\\:prose-invert") || document.querySelector("[class*='prose'][class*='prose-invert']") || document.querySelector("span[data-lexical-text='true']")) {
       addExportButton();
     }
   }
