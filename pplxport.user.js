@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Perplexity.ai Chat Exporter
 // @namespace    https://github.com/ckep1/pplxport
-// @version      2.0.0
+// @version      2.0.1
 // @description  Export Perplexity.ai conversations as markdown with configurable citation styles
 // @author       Chris Kephart
 // @match        https://www.perplexity.ai/*
@@ -288,7 +288,7 @@
   // SCROLL & NAVIGATION HELPERS
   // ============================================================================
 
-  async function pageDownOnce(scroller, delayMs = 500, factor = 0.9) {
+  async function pageDownOnce(scroller, delayMs = 90, factor = 0.9) {
     if (!scroller) scroller = getScrollRoot();
     const delta = Math.max(200, Math.floor(scroller.clientHeight * factor));
     scroller.scrollTop = Math.min(scroller.scrollTop + delta, scroller.scrollHeight);
@@ -300,15 +300,15 @@
       const scroller = getScrollRoot();
       window.focus();
       scroller.scrollTop = 0;
-      await new Promise((resolve) => setTimeout(resolve, 300));
+      await new Promise((resolve) => setTimeout(resolve, 80));
 
       let lastHeight = scroller.scrollHeight;
       let stableCount = 0;
-      const maxTries = 80; // ~40s at 500ms intervals
+      const maxTries = 25; // shorter preload with faster intervals
 
-      for (let i = 0; i < maxTries && stableCount < 3; i++) {
+      for (let i = 0; i < maxTries && stableCount < 2; i++) {
         scroller.scrollTop = scroller.scrollHeight;
-        await new Promise((resolve) => setTimeout(resolve, 500));
+        await new Promise((resolve) => setTimeout(resolve, 120));
         const newHeight = scroller.scrollHeight;
         if (newHeight > lastHeight + 10) {
           lastHeight = newHeight;
@@ -319,7 +319,7 @@
       }
       // Return to top so processing starts from the beginning
       scroller.scrollTop = 0;
-      await new Promise((resolve) => setTimeout(resolve, 500));
+      await new Promise((resolve) => setTimeout(resolve, 120));
     } catch (e) {
       // Non-fatal; we'll just proceed
       console.warn("Preload scroll encountered an issue:", e);
@@ -340,7 +340,7 @@
     }
   }
 
-  async function readClipboardWithRetries(maxRetries = 3, delayMs = 200) {
+  async function readClipboardWithRetries(maxRetries = 3, delayMs = 60) {
     let last = "";
     for (let i = 0; i < maxRetries; i++) {
       try {
@@ -376,6 +376,13 @@
       if (patterns.test(label) || patterns.test(text)) {
         // avoid code-block related buttons
         if (el.closest("pre, code")) continue;
+        // avoid external anchors that might navigate
+        if (el.tagName && el.tagName.toLowerCase() === "a") {
+          const href = (el.getAttribute("href") || "").trim();
+          const target = (el.getAttribute("target") || "").trim().toLowerCase();
+          const isExternal = /^https?:\/\//i.test(href);
+          if (isExternal || target === "_blank") continue;
+        }
         candidates.push(el);
       }
     }
@@ -417,11 +424,11 @@
     try {
       window.focus();
       simulateHover(button);
-      await new Promise((r) => setTimeout(r, 100));
+      await new Promise((r) => setTimeout(r, 40));
       button.focus();
       button.click();
-      await new Promise((r) => setTimeout(r, 200));
-      return await readClipboardWithRetries(3, 150);
+      await new Promise((r) => setTimeout(r, 60));
+      return await readClipboardWithRetries(3, 60);
     } catch (e) {
       return "";
     }
@@ -429,15 +436,15 @@
 
   async function clickButtonAndGetClipboard(button) {
     window.focus();
-    button.scrollIntoView({ behavior: "smooth", block: "center", inline: "center" });
-    await new Promise((r) => setTimeout(r, 200));
+    button.scrollIntoView({ behavior: "instant", block: "center", inline: "center" });
+    await new Promise((r) => setTimeout(r, 60));
     simulateHover(button);
-    await new Promise((r) => setTimeout(r, 150));
+    await new Promise((r) => setTimeout(r, 40));
     button.focus();
     button.click();
-    await new Promise((r) => setTimeout(r, 500));
+    await new Promise((r) => setTimeout(r, 120));
     window.focus();
-    return await readClipboardWithRetries(4, 250);
+    return await readClipboardWithRetries(3, 60);
   }
 
   function collectAnchoredMessageRootsOnce() {
@@ -484,12 +491,12 @@
 
     const scroller = getScrollRoot();
     scroller.scrollTop = 0;
-    await new Promise((r) => setTimeout(r, 200));
+    await new Promise((r) => setTimeout(r, 80));
 
     let stableBottomCount = 0;
     let scrollAttempt = 0;
-    const maxScrollAttempts = 300;
-    const scrollDelay = 500;
+    const maxScrollAttempts = 200;
+    const scrollDelay = 90;
 
     while (scrollAttempt < maxScrollAttempts && stableBottomCount < 5) {
       scrollAttempt++;
@@ -559,12 +566,12 @@
 
     const scroller = getScrollRoot();
     scroller.scrollTop = 0;
-    await new Promise((r) => setTimeout(r, 300));
+    await new Promise((r) => setTimeout(r, 80));
 
     let stableBottomCount = 0;
     let scrollAttempt = 0;
-    const maxScrollAttempts = 300;
-    const scrollDelay = 500;
+    const maxScrollAttempts = 200;
+    const scrollDelay = 90;
 
     while (scrollAttempt < maxScrollAttempts && stableBottomCount < 5) {
       scrollAttempt++;
@@ -681,12 +688,12 @@
     // Start at top and progressively page down to handle virtualized lists
     const scroller = getScrollRoot();
     scroller.scrollTop = 0;
-    await new Promise((r) => setTimeout(r, 400));
+    await new Promise((r) => setTimeout(r, 80));
 
     let stableCount = 0;
     let scrollAttempt = 0;
-    const maxScrollAttempts = 120;
-    const scrollDelay = 600;
+    const maxScrollAttempts = 80;
+    const scrollDelay = 120;
 
     while (scrollAttempt < maxScrollAttempts && stableCount < 5) {
       scrollAttempt++;
@@ -795,16 +802,16 @@
     // Ensure document stays focused
     window.focus();
 
-    // Start from top
-    const scroller = getScrollRoot();
-    scroller.scrollTop = 0;
-    await new Promise((resolve) => setTimeout(resolve, 500));
+      // Start from top
+  const scroller = getScrollRoot();
+  scroller.scrollTop = 0;
+  await new Promise((resolve) => setTimeout(resolve, 120));
 
     let stableCount = 0;
     let scrollAttempt = 0;
     let lastButtonCount = 0;
-    const maxScrollAttempts = 100; // Increase max attempts
-    const scrollDelay = 600; // delay between page downs
+    const maxScrollAttempts = 80; // faster loop
+    const scrollDelay = 120; // shorter delay between page downs
 
     while (scrollAttempt < maxScrollAttempts && stableCount < 5) {
       scrollAttempt++;
@@ -833,9 +840,9 @@
 
     console.log(`Scroll complete after ${scrollAttempt} attempts. Found ${conversation.length} conversation items`);
 
-    // Return to top
-    scroller.scrollTop = 0;
-    await new Promise((resolve) => setTimeout(resolve, 500));
+      // Return to top
+  scroller.scrollTop = 0;
+  await new Promise((resolve) => setTimeout(resolve, 120));
 
     return conversation;
 
@@ -886,18 +893,18 @@
 
           // Scroll button into view and center it
           button.scrollIntoView({
-            behavior: "smooth",
+            behavior: "instant",
             block: "center",
             inline: "center",
           });
-          await new Promise((resolve) => setTimeout(resolve, 300));
+          await new Promise((resolve) => setTimeout(resolve, 80));
 
           // Click button
           button.focus();
           button.click();
 
           // Wait for clipboard
-          await new Promise((resolve) => setTimeout(resolve, 500));
+          await new Promise((resolve) => setTimeout(resolve, 120));
           window.focus();
 
           const clipboardText = await navigator.clipboard.readText();
@@ -1103,51 +1110,80 @@
       localToGlobalMap.set(localNum, globalNum);
     });
 
-    // Replace citations in the content based on the desired style
-    // Sort by localNum in descending order to avoid replacement interference (e.g., [10] before [1])
-    const sortedEntries = Array.from(localToGlobalMap.entries()).sort((a, b) => {
-      const numA = parseInt(a[0]);
-      const numB = parseInt(b[0]);
-      return numB - numA; // Sort in descending order
+    // Normalize any inline [N](url) occurrences inside the content into [N] tokens, while capturing URLs
+    content = content.replace(/\[(\d+)\]\(([^)]+)\)/g, (m, localNum, url) => {
+      if (!localReferences.has(localNum)) {
+        localReferences.set(localNum, url);
+        if (!localToGlobalMap.has(localNum)) {
+          const globalNum = globalCitations.addCitation(url);
+          localToGlobalMap.set(localNum, globalNum);
+        }
+      }
+      return `[${localNum}]`;
     });
 
-    sortedEntries.forEach(([localNum, globalNum]) => {
-      if (citationStyle === CITATION_STYLES.ENDNOTES) {
-        // Replace [N](url) with [globalN] and [N] with [globalN]
-        const linkRegex = new RegExp(`\\[${localNum}\\]\\([^)]+\\)`, "g");
-        const plainRegex = new RegExp(`\\[${localNum}\\](?!\\()`, "g");
-        content = content.replace(linkRegex, `[${globalNum}]`);
-        content = content.replace(plainRegex, `[${globalNum}]`);
-      } else if (citationStyle === CITATION_STYLES.INLINE) {
-        // Replace [N] with [globalN](url) and keep [N](url) as [globalN](url)
-        const url = localReferences.get(localNum);
-        const linkRegex = new RegExp(`\\[${localNum}\\]\\([^)]+\\)`, "g");
-        const plainRegex = new RegExp(`\\[${localNum}\\](?!\\()`, "g");
-        content = content.replace(linkRegex, `[${globalNum}](${url})`);
-        content = content.replace(plainRegex, `[${globalNum}](${url})`);
-      } else if (citationStyle === CITATION_STYLES.PARENTHESIZED) {
-        // Replace with ([globalN](url))
-        const url = localReferences.get(localNum);
-        const linkRegex = new RegExp(`\\[${localNum}\\]\\([^)]+\\)`, "g");
-        const plainRegex = new RegExp(`\\[${localNum}\\](?!\\()`, "g");
-        content = content.replace(linkRegex, `([${globalNum}](${url}))`);
-        content = content.replace(plainRegex, `([${globalNum}](${url}))`);
-      } else if (citationStyle === CITATION_STYLES.NAMED) {
-        // Replace with ([domain](url))
-        const url = localReferences.get(localNum);
-        const domain = extractDomainName(url) || "source";
-        const linkRegex = new RegExp(`\\[${localNum}\\]\\([^)]+\\)`, "g");
-        const plainRegex = new RegExp(`\\[${localNum}\\](?!\\()`, "g");
-        content = content.replace(linkRegex, `([${domain}](${url}))`);
-        content = content.replace(plainRegex, `([${domain}](${url}))`);
-      }
+    // Helper builders per style for a run of local numbers
+    function buildEndnotesRun(localNums) {
+      return localNums
+        .map((n) => {
+          const g = localToGlobalMap.get(n) || n;
+          return `[${g}]`;
+        })
+        .join("");
+    }
+
+    function buildInlineRun(localNums) {
+      return localNums
+        .map((n) => {
+          const url = localReferences.get(n) || "";
+          const g = localToGlobalMap.get(n) || n;
+          return url ? `[${g}](${url})` : `[${g}]`;
+        })
+        .join("");
+    }
+
+    function buildParenthesizedRun(localNums) {
+      // Render each citation in its own parentheses: ([g1](u1)) ([g2](u2)) ...
+      return localNums
+        .map((n) => {
+          const url = localReferences.get(n) || "";
+          const g = localToGlobalMap.get(n) || n;
+          const core = url ? `[${g}](${url})` : `[${g}]`;
+          return `(${core})`;
+        })
+        .join(" ");
+    }
+
+    function buildNamedRun(localNums) {
+      // Render each citation in its own parentheses with domain name: ([domain1](u1)) ([domain2](u2)) ...
+      return localNums
+        .map((n) => {
+          const url = localReferences.get(n) || "";
+          const domain = extractDomainName(url) || "source";
+          const core = url ? `[${domain}](${url})` : `[${domain}]`;
+          return `(${core})`;
+        })
+        .join(" ");
+    }
+
+    // Replace runs of citation tokens like [2][4][5] or with spaces between with style-specific output
+    // Don't consume trailing whitespace/newlines so we preserve layout
+    content = content.replace(/(?:\s*\[\d+\])+/g, (run) => {
+      const nums = Array.from(run.matchAll(/\[(\d+)\]/g)).map((m) => m[1]);
+      if (nums.length === 0) return run;
+      if (citationStyle === CITATION_STYLES.ENDNOTES) return buildEndnotesRun(nums);
+      if (citationStyle === CITATION_STYLES.INLINE) return buildInlineRun(nums);
+      if (citationStyle === CITATION_STYLES.PARENTHESIZED) return buildParenthesizedRun(nums);
+      if (citationStyle === CITATION_STYLES.NAMED) return buildNamedRun(nums);
+      return run;
     });
 
     // Citations processed and remapped to global numbers
 
-    // Clean up any extra parentheses that might have been created
-    content = content.replace(/\)\)\)/g, "))"); // Fix triple parentheses
-    content = content.replace(/\(\(\(/g, "(("); // Fix triple opening parentheses
+    // Clean up any excessive parentheses sequences that might have been created
+    // Collapse 3+ to 2 and remove spaces before punctuation
+    content = content.replace(/\){3,}/g, "))");
+    content = content.replace(/\(\({2,}/g, "((");
 
     // Handle newline spacing based on user preference
     const prefs = getPreferences();
@@ -1461,8 +1497,8 @@
     }
 
     if (citationStyle === CITATION_STYLES.INLINE || citationStyle === CITATION_STYLES.PARENTHESIZED) {
-      // Remove extraneous space before a period: e.g. " [1](url) ." -> " [1](url)."
-      text = text.replace(/\s+\./g, ".");
+      // Remove extraneous space before a period, but preserve newlines
+      text = text.replace(/ (?=\.)/g, "");
     }
 
     // Add citations at the bottom for endnotes style
@@ -1548,6 +1584,32 @@
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
+  }
+
+  // Temporarily prevent navigation (external anchors and window.open) during export
+  function installNavBlocker() {
+    const clickBlocker = (e) => {
+      try {
+        const anchor = e.target && e.target.closest && e.target.closest('a[href], area[href]');
+        if (!anchor) return;
+        const href = (anchor.getAttribute('href') || '').trim();
+        const target = (anchor.getAttribute('target') || '').trim().toLowerCase();
+        const isExternal = /^https?:\/\//i.test(href);
+        if (isExternal || target === '_blank') {
+          e.preventDefault();
+          e.stopImmediatePropagation();
+        }
+      } catch {}
+    };
+    document.addEventListener('click', clickBlocker, true);
+
+    const originalOpen = window.open;
+    window.open = function () { return null; };
+
+    return function removeNavBlocker() {
+      try { document.removeEventListener('click', clickBlocker, true); } catch {}
+      try { window.open = originalOpen; } catch {}
+    };
   }
 
   // Create and add export button
@@ -1723,6 +1785,7 @@
       button.textContent = "Exporting...";
       button.disabled = true;
 
+      const removeNavBlocker = installNavBlocker();
       try {
         // Ensure window is focused before starting
         window.focus();
@@ -1750,6 +1813,7 @@
         console.error("Export failed:", error);
         alert("Export failed. Please try again.");
       } finally {
+        try { removeNavBlocker(); } catch {}
         // Restore button state
         button.textContent = originalText;
         button.disabled = false;
