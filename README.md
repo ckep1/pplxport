@@ -1,24 +1,37 @@
-## Perplexity.ai Chat Downloader (pplxport)
+# Perplexity.ai Chat Downloader (pplxport)
 
-This script allows for downloading threads and pages from Perplexity as Markdown with citations included linked inline. Perplexity has since added export in the client itself, but this allows for inline linked citations and doesn't include the logo for a better experience. 
+This script allows for downloading threads and pages from Perplexity as Markdown with multiple citation styles. Although Perplexity has since added export in the client itself, this script provides a better experience with options, entire conversation export, no Perplexity html logo in the Markdown and more. This is under the MIT license. If anything breaks please let me know via a github issue!
 
-This now uses the copy buttons on the page to get all of the citations. The previous method used the site content directly, but that results in citations with more than one source `[Reddit +2]` only capturing the first link. This method gets every link properly and can export entire conversations at once. This should also (hopefully) result in this breaking less frequently due to html changes. Though this does result in clipboard permissions being requested, this is only to get the content, there is no networking in this script and it stays private.
+Configure the following settings via the `Options` button menu:
 
-Fallback methods exist if the copy button mode stops working. 
-
-### Citation Styles
-
-Configure via the userscript menu (Tampermonkey/Greasemonkey icon):
+## Citation Style
 
 - **Inline**: `[1](url)` - Clean inline citations
 - **Parenthesized** (default): `([1](url))` - Inline citations wrapped in parentheses  
 - **Endnotes**: `[1]` in text with sources listed at the end
 - **Named**: `[source](url)` - Uses domain names like `[wikipedia](url)`
+- **No Citations**: Removes all citations for answer text only.
 
-### Format Options
+## Output Style
+
+### Layout
 
 - **Full Format**: Includes User/Assistant labels and section dividers
 - **Concise Format**: Just the content with minimal formatting (no user queries included in the content).
-- **Enable/Disable Extra Newlines**: By default, this does not put newlines between paragraphs and elements as markdown renderers do this visually. The option to enable them exists.
 
-Configure these options through the userscript menu commands after installation. 
+### Spacing
+
+- **Standard**: By default, this script does not put newlines between paragraphs and elements as markdown renderers do this visually. This makes rendered files appear cleaner but raw files harder to read.
+- **Extra Newlines**: This is the markdown spacing used by Perplexity with newlines before and after each element such as headers and paragraphs.
+
+## Export Options
+
+### Output Method
+
+- **Download File**: Downloads a .md file.
+- **Copy to Clipboard**: Copies the entire conversation with this formatting to the clipboard, no file saved.
+
+### Extraction Method
+
+- **Comprehensive (Recommended)**: Uses the copy buttons for consistent exports with all citations. Requires clipboard usage.
+- **Direct (Deprecated)**: Uses the DOM to export the content directly from the rendered HTML on the page. Deprecated due to missing nested citations, it only gets the first link. It misses parts of long conversations due to the way Perplexity loads long conversations. This method also breaks with site changes. Despite the downsides, it is faster and does not require the clipboard.
