@@ -1364,7 +1364,9 @@
             const countMatch = numberSpan ? numberSpan.textContent.match(/\+(\d+)$/) : null;
             const count = countMatch ? parseInt(countMatch[1]) : 2;
 
-            if (citationStyle === CITATION_STYLES.NAMED && sourceName) {
+            if (citationStyle === CITATION_STYLES.NONE) {
+              citationText = ""; // Remove citation completely
+            } else if (citationStyle === CITATION_STYLES.NAMED && sourceName) {
               citationText = ` [${sourceName} +${count} more](${citationUrl}) `;
             } else {
               citationText = ` [${number} +${count} more](${citationUrl}) `;
