@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Perplexity.ai Chat Exporter
 // @namespace    https://github.com/ckep1/pplxport
-// @version      2.1.0
+// @version      2.2.0
 // @description  Export Perplexity.ai conversations as markdown with configurable citation styles
 // @author       Chris Kephart
 // @match        https://www.perplexity.ai/*
@@ -125,6 +125,8 @@
       addExtraNewlines: GM_getValue("addExtraNewlines", false),
       exportMethod: GM_getValue("exportMethod", EXPORT_METHODS.DOWNLOAD),
       extractionMethod: GM_getValue("extractionMethod", EXTRACTION_METHODS.COMPREHENSIVE),
+      includeFrontmatter: GM_getValue("includeFrontmatter", true),
+      titleAsH1: GM_getValue("titleAsH1", false),
     };
   }
 
@@ -1212,7 +1214,7 @@
     } else {
       // Strip ALL extra newlines by default - single newlines only everywhere
       content = content
-        .replace(/\n+/g, "\n")  // Replace any multiple newlines with single newline
+        .replace(/\n+/g, "\n") // Replace any multiple newlines with single newline
         .replace(/\n\s*\n/g, "\n"); // Remove any newlines with just whitespace between them
     }
 
@@ -1515,7 +1517,7 @@
     } else {
       // Strip ALL extra newlines by default - single newlines only everywhere
       text = text
-        .replace(/\n+/g, "\n")  // Replace any multiple newlines with single newline
+        .replace(/\n+/g, "\n") // Replace any multiple newlines with single newline
         .replace(/\n\s*\n/g, "\n"); // Remove any newlines with just whitespace between them
     }
 
@@ -1541,11 +1543,21 @@
     const timestamp = new Date().toISOString().split("T")[0];
     const prefs = getPreferences();
 
-    let markdown = "---\n";
-    markdown += `title: ${title}\n`;
-    markdown += `date: ${timestamp}\n`;
-    markdown += `source: ${window.location.href}\n`;
-    markdown += "---\n\n"; // Add newline after properties
+    let markdown = "";
+
+    // Only add frontmatter if enabled
+    if (prefs.includeFrontmatter) {
+      markdown += "---\n";
+      markdown += `title: ${title}\n`;
+      markdown += `date: ${timestamp}\n`;
+      markdown += `source: ${window.location.href}\n`;
+      markdown += "---\n\n"; // Add newline after properties
+    }
+
+    // Add title as H1 if enabled
+    if (prefs.titleAsH1) {
+      markdown += `# ${title}\n\n`;
+    }
 
     conversations.forEach((conv, index) => {
       if (conv.role === "Assistant") {
@@ -1787,7 +1799,7 @@
       return optionBtn;
     }
 
-    function appendOptionGroup(sectionEl, label, options, currentValue, onSelect) {
+    function appendOptionGroup(sectionEl, label, options, currentValue, onSelect, labelTooltip) {
       const group = document.createElement("div");
       group.style.display = "flex";
       group.style.flexDirection = "column";
@@ -1797,6 +1809,10 @@
         const groupLabel = document.createElement("div");
         groupLabel.textContent = label;
         groupLabel.style.cssText = "font-size: 12px; font-weight: 600; color: #d1d5db;";
+        if (labelTooltip) {
+          groupLabel.setAttribute("title", labelTooltip);
+          groupLabel.style.cursor = "help";
+        }
         group.appendChild(groupLabel);
       }
 
@@ -1873,6 +1889,30 @@
         ],
         prefs.addExtraNewlines,
         (next) => GM_setValue("addExtraNewlines", next)
+      );
+
+      appendOptionGroup(
+        outputSection,
+        "Frontmatter",
+        [
+          { label: "Include", value: true, tooltip: "Include YAML metadata (title, date, source URL) at the top" },
+          { label: "Exclude", value: false, tooltip: "Export just the conversation content without metadata" },
+        ],
+        prefs.includeFrontmatter,
+        (next) => GM_setValue("includeFrontmatter", next),
+        "YAML metadata section at the top with title, date, and source URL"
+      );
+
+      appendOptionGroup(
+        outputSection,
+        "Title as H1",
+        [
+          { label: "Include", value: true, tooltip: "Add the conversation title as a level 1 heading" },
+          { label: "Exclude", value: false, tooltip: "Don't add title as heading (use frontmatter only)" },
+        ],
+        prefs.titleAsH1,
+        (next) => GM_setValue("titleAsH1", next),
+        "Add the conversation title as a # heading at the top"
       );
 
       menu.appendChild(outputSection);
