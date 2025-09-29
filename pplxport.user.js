@@ -1,13 +1,12 @@
 // ==UserScript==
 // @name         Perplexity.ai Chat Exporter
 // @namespace    https://github.com/ckep1/pplxport
-// @version      2.0.1
+// @version      2.1.0
 // @description  Export Perplexity.ai conversations as markdown with configurable citation styles
 // @author       Chris Kephart
 // @match        https://www.perplexity.ai/*
 // @grant        GM_getValue
 // @grant        GM_setValue
-// @grant        GM_registerMenuCommand
 // @run-at       document-idle
 // @license      MIT
 // ==/UserScript==
@@ -28,11 +27,58 @@
     INLINE: "inline",
     PARENTHESIZED: "parenthesized",
     NAMED: "named",
+    NONE: "none",
+  };
+
+  const CITATION_STYLE_LABELS = {
+    [CITATION_STYLES.ENDNOTES]: "Endnotes",
+    [CITATION_STYLES.INLINE]: "Inline",
+    [CITATION_STYLES.PARENTHESIZED]: "Parenthesized",
+    [CITATION_STYLES.NAMED]: "Named",
+    [CITATION_STYLES.NONE]: "No Citations",
+  };
+
+  const CITATION_STYLE_DESCRIPTIONS = {
+    [CITATION_STYLES.ENDNOTES]: "[1] in text with sources listed at the end",
+    [CITATION_STYLES.INLINE]: "[1](url) - Clean inline citations",
+    [CITATION_STYLES.PARENTHESIZED]: "([1](url)) - Inline citations in parentheses",
+    [CITATION_STYLES.NAMED]: "[wikipedia](url) - Uses domain names",
+    [CITATION_STYLES.NONE]: "Remove all citations from the text",
   };
 
   const FORMAT_STYLES = {
     FULL: "full", // Include User/Assistant tags and all dividers
     CONCISE: "concise", // Just content, minimal dividers
+  };
+
+  const FORMAT_STYLE_LABELS = {
+    [FORMAT_STYLES.FULL]: "Full",
+    [FORMAT_STYLES.CONCISE]: "Concise",
+  };
+
+  const EXPORT_METHODS = {
+    DOWNLOAD: "download",
+    CLIPBOARD: "clipboard",
+  };
+
+  const EXPORT_METHOD_LABELS = {
+    [EXPORT_METHODS.DOWNLOAD]: "Download File",
+    [EXPORT_METHODS.CLIPBOARD]: "Copy to Clipboard",
+  };
+
+  const EXTRACTION_METHODS = {
+    COMPREHENSIVE: "comprehensive",
+    DIRECT: "direct",
+  };
+
+  const EXTRACTION_METHOD_LABELS = {
+    [EXTRACTION_METHODS.COMPREHENSIVE]: "Comprehensive",
+    [EXTRACTION_METHODS.DIRECT]: "Direct (deprecated)",
+  };
+
+  const EXTRACTION_METHOD_DESCRIPTIONS = {
+    [EXTRACTION_METHODS.COMPREHENSIVE]: "Uses copy buttons for reliable extraction with full citations. Slower but more reliable.",
+    [EXTRACTION_METHODS.DIRECT]: "Direct DOM parsing. DEPRECATED: Breaks with Perplexity site changes and misses citations by nature, but is faster.",
   };
 
   // Global citation tracking for consistent numbering across all responses
@@ -68,50 +114,6 @@
   };
 
   // ============================================================================
-  // MENU COMMANDS
-  // ============================================================================
-
-  GM_registerMenuCommand("Use Endnotes Citation Style", () => {
-    GM_setValue("citationStyle", CITATION_STYLES.ENDNOTES);
-    alert("Citation style set to endnotes. Format: [1] with sources listed at end.");
-  });
-
-  GM_registerMenuCommand("Use Inline Citation Style", () => {
-    GM_setValue("citationStyle", CITATION_STYLES.INLINE);
-    alert("Citation style set to inline. Format: [1](url)");
-  });
-
-  GM_registerMenuCommand("Use Parenthesized Citation Style", () => {
-    GM_setValue("citationStyle", CITATION_STYLES.PARENTHESIZED);
-    alert("Citation style set to parenthesized. Format: ([1](url))");
-  });
-
-  GM_registerMenuCommand("Use Named Citation Style", () => {
-    GM_setValue("citationStyle", CITATION_STYLES.NAMED);
-    alert("Citation style set to named. Format: [source](url) using source names like 'wikipedia', 'reddit', etc.");
-  });
-
-  GM_registerMenuCommand("Full Format (with User/Assistant)", () => {
-    GM_setValue("formatStyle", FORMAT_STYLES.FULL);
-    alert("Format set to full with User/Assistant tags.");
-  });
-
-  GM_registerMenuCommand("Concise Format (content only)", () => {
-    GM_setValue("formatStyle", FORMAT_STYLES.CONCISE);
-    alert("Format set to concise content only.");
-  });
-
-  GM_registerMenuCommand("Enable Extra Newlines", () => {
-    GM_setValue("addExtraNewlines", true);
-    alert("Extra newlines enabled. Adds blank lines after paragraphs and list items.");
-  });
-
-  GM_registerMenuCommand("Disable Extra Newlines", () => {
-    GM_setValue("addExtraNewlines", false);
-    alert("Extra newlines disabled. Standard markdown spacing.");
-  });
-
-  // ============================================================================
   // UTILITY FUNCTIONS
   // ============================================================================
 
@@ -121,6 +123,8 @@
       citationStyle: GM_getValue("citationStyle", CITATION_STYLES.PARENTHESIZED),
       formatStyle: GM_getValue("formatStyle", FORMAT_STYLES.FULL),
       addExtraNewlines: GM_getValue("addExtraNewlines", false),
+      exportMethod: GM_getValue("exportMethod", EXPORT_METHODS.DOWNLOAD),
+      extractionMethod: GM_getValue("extractionMethod", EXTRACTION_METHODS.COMPREHENSIVE),
     };
   }
 
@@ -941,47 +945,9 @@
     }
   }
 
-  // MAIN EXTRACTION ORCHESTRATOR
-  async function extractConversation(citationStyle) {
-    // Reset global citation tracking
-    globalCitations.reset();
-
-    // Method 1: Page-down with button clicking (most reliable)
-    // Uses Perplexity's native copy buttons to extract exact content
-    console.log("Trying Method 1: Page-down with button clicking...");
-    const viaButtons = await extractByPageDownClickButtons(citationStyle);
-    console.log(`Method 1 found ${viaButtons.length} items`);
-    if (viaButtons.length >= 2) {
-      // At least 1 complete turn (User + Assistant)
-      console.log("✅ Using Method 1: Button clicking extraction");
-      return viaButtons;
-    }
-
-    // Method 2: Single-pass DOM scan (no button clicking)
-    // Directly reads DOM content while scrolling
-    console.log("Trying Method 2: Single-pass DOM scan...");
-    const domSingle = await extractByDomScanSinglePass(citationStyle);
-    console.log(`Method 2 found ${domSingle.length} items`);
-    if (domSingle.length >= 2) {
-      // At least 1 complete turn (User + Assistant)
-      console.log("✅ Using Method 2: DOM scan extraction");
-      return domSingle;
-    }
-
-    // Method 3: Anchored copy button approach (legacy)
-    // Falls back to older button-based extraction
-    console.log("Trying Method 3: Anchored copy button approach...");
-    const copyButtonApproach = await extractUsingCopyButtons(citationStyle);
-    console.log(`Method 3 found ${copyButtonApproach.length} items`);
-    if (copyButtonApproach.length >= 2) {
-      // At least 1 complete turn (User + Assistant)
-      console.log("✅ Using Method 3: Anchored button extraction");
-      return copyButtonApproach;
-    }
-
-    // Method 4: Direct DOM parsing (final fallback)
-    // Parses visible DOM elements without any scrolling
-    console.log("Trying Method 4: Direct DOM parsing fallback...");
+  // Direct/Fast extraction method (Method 5)
+  async function extractByDirectDomParsing(citationStyle) {
+    console.log("Using direct DOM parsing (fast method)...");
     const conversation = [];
     const seenUserQueries = new Set();
 
@@ -1057,13 +1023,65 @@
       });
     }
 
-    console.log(`Method 4 found ${conversation.length} items`);
-    if (conversation.length > 0) {
+    console.log(`Direct method found ${conversation.length} items`);
+    return conversation;
+  }
+
+  // MAIN EXTRACTION ORCHESTRATOR
+  async function extractConversation(citationStyle, extractionMethod = EXTRACTION_METHODS.COMPREHENSIVE) {
+    // Reset global citation tracking
+    globalCitations.reset();
+
+    // If direct method is selected, use it immediately
+    if (extractionMethod === EXTRACTION_METHODS.DIRECT) {
+      console.log("✅ Using Direct extraction method");
+      return await extractByDirectDomParsing(citationStyle);
+    }
+
+    // Method 1: Page-down with button clicking (most reliable)
+    // Uses Perplexity's native copy buttons to extract exact content
+    console.log("Trying Method 1: Page-down with button clicking...");
+    const viaButtons = await extractByPageDownClickButtons(citationStyle);
+    console.log(`Method 1 found ${viaButtons.length} items`);
+    if (viaButtons.length >= 2) {
+      // At least 1 complete turn (User + Assistant)
+      console.log("✅ Using Method 1: Button clicking extraction");
+      return viaButtons;
+    }
+
+    // Method 2: Single-pass DOM scan (no button clicking)
+    // Directly reads DOM content while scrolling
+    console.log("Trying Method 2: Single-pass DOM scan...");
+    const domSingle = await extractByDomScanSinglePass(citationStyle);
+    console.log(`Method 2 found ${domSingle.length} items`);
+    if (domSingle.length >= 2) {
+      // At least 1 complete turn (User + Assistant)
+      console.log("✅ Using Method 2: DOM scan extraction");
+      return domSingle;
+    }
+
+    // Method 3: Anchored copy button approach (legacy)
+    // Falls back to older button-based extraction
+    console.log("Trying Method 3: Anchored copy button approach...");
+    const copyButtonApproach = await extractUsingCopyButtons(citationStyle);
+    console.log(`Method 3 found ${copyButtonApproach.length} items`);
+    if (copyButtonApproach.length >= 2) {
+      // At least 1 complete turn (User + Assistant)
+      console.log("✅ Using Method 3: Anchored button extraction");
+      return copyButtonApproach;
+    }
+
+    // Method 4: Direct DOM parsing (final fallback)
+    // Parses visible DOM elements without any scrolling
+    console.log("Trying Method 4: Direct DOM parsing fallback...");
+    const fallbackResult = await extractByDirectDomParsing(citationStyle);
+    console.log(`Method 4 found ${fallbackResult.length} items`);
+    if (fallbackResult.length > 0) {
       console.log("✅ Using Method 4: Direct DOM parsing");
     } else {
       console.log("❌ No content found with any method");
     }
-    return conversation;
+    return fallbackResult;
   }
 
   // ============================================================================
@@ -1171,6 +1189,7 @@
     content = content.replace(/(?:\s*\[\d+\])+/g, (run) => {
       const nums = Array.from(run.matchAll(/\[(\d+)\]/g)).map((m) => m[1]);
       if (nums.length === 0) return run;
+      if (citationStyle === CITATION_STYLES.NONE) return ""; // Remove citations completely
       if (citationStyle === CITATION_STYLES.ENDNOTES) return buildEndnotesRun(nums);
       if (citationStyle === CITATION_STYLES.INLINE) return buildInlineRun(nums);
       if (citationStyle === CITATION_STYLES.PARENTHESIZED) return buildParenthesizedRun(nums);
@@ -1352,7 +1371,9 @@
             }
           } else {
             // Single citation - use normal format
-            if (citationStyle === CITATION_STYLES.INLINE) {
+            if (citationStyle === CITATION_STYLES.NONE) {
+              citationText = ""; // Remove citation completely
+            } else if (citationStyle === CITATION_STYLES.INLINE) {
               citationText = ` [${number}](${citationUrl}) `;
             } else if (citationStyle === CITATION_STYLES.PARENTHESIZED) {
               citationText = ` ([${number}](${citationUrl})) `;
@@ -1586,6 +1607,17 @@
     URL.revokeObjectURL(url);
   }
 
+  // Copy to clipboard
+  async function copyToClipboard(content) {
+    try {
+      await navigator.clipboard.writeText(content);
+      return true;
+    } catch (err) {
+      console.error('Failed to copy to clipboard:', err);
+      return false;
+    }
+  }
+
   // Temporarily prevent navigation (external anchors and window.open) during export
   function installNavBlocker() {
     const clickBlocker = (e) => {
@@ -1614,31 +1646,332 @@
 
   // Create and add export button
   function addExportButton() {
-    const existingButton = document.getElementById("perplexity-export-btn");
-    if (existingButton) {
-      existingButton.remove();
+    const existingControls = document.getElementById("perplexity-export-controls");
+    if (existingControls) {
+      existingControls.remove();
     }
 
-    const button = document.createElement("button");
-    button.id = "perplexity-export-btn";
-    button.textContent = "Save as Markdown";
+    const container = document.createElement("div");
+    container.id = "perplexity-export-controls";
+    container.style.cssText = `
+            position: fixed;
+            bottom: 40px;
+            left: 50%;
+            transform: translateX(-50%);
+            display: flex;
+            gap: 8px;
+            align-items: stretch;
+            z-index: 99999;
+            font-family: inherit;
+        `;
 
-    // Position button relative to main content area
-    const positionButton = () => {
-      // Multiple strategies to find the main content area
+    const exportButton = document.createElement("button");
+    exportButton.id = "perplexity-export-btn";
+    exportButton.type = "button";
+    exportButton.textContent = "Save as Markdown"; // Default, will be updated
+    exportButton.style.cssText = `
+            padding: 4px 8px;
+            background-color: #30b8c6;
+            color: black;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 12px;
+            font-weight: 600;
+            transition: background-color 0.2s;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        `;
 
-      // Strategy 1: Find the thread content container
+    const optionsWrapper = document.createElement("div");
+    optionsWrapper.style.cssText = `
+            position: relative;
+            display: flex;
+        `;
+
+    const optionsButton = document.createElement("button");
+    optionsButton.id = "perplexity-export-options-btn";
+    optionsButton.type = "button";
+    optionsButton.setAttribute("aria-haspopup", "true");
+    optionsButton.setAttribute("aria-expanded", "false");
+    optionsButton.style.cssText = `
+            padding: 4px 8px;
+            background-color: #30b8c6;
+            color: black;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 12px;
+            font-weight: 600;
+            transition: background-color 0.2s;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            white-space: nowrap;
+        `;
+
+    const menu = document.createElement("div");
+    menu.id = "perplexity-export-options-menu";
+    menu.style.cssText = `
+            position: absolute;
+            bottom: calc(100% + 8px);
+            left: 50%;
+            transform: translateX(-50%);
+            display: none;
+            flex-direction: column;
+            gap: 10px;
+            min-width: 280px;
+            background: #1F2121;
+            color: white;
+            border-radius: 12px;
+            padding: 12px;
+            box-shadow: 0 12px 24px rgba(0, 0, 0, 0.25);
+        `;
+
+    optionsWrapper.appendChild(optionsButton);
+
+    container.appendChild(exportButton);
+    container.appendChild(optionsWrapper);
+    container.appendChild(menu);
+
+    function updateOptionsButtonLabel() {
+      const label = `Options`;
+      optionsButton.textContent = label;
+      optionsButton.setAttribute("aria-label", `Export options. ${label}`);
+    }
+
+    function updateExportButtonLabel() {
+      const prefs = getPreferences();
+      const label = prefs.exportMethod === EXPORT_METHODS.CLIPBOARD ? "Copy as Markdown" : "Save as Markdown";
+      exportButton.textContent = label;
+    }
+
+    function createOptionButton(label, value, currentValue, onSelect, tooltip) {
+      const optionBtn = document.createElement("button");
+      optionBtn.type = "button";
+      optionBtn.textContent = label;
+      if (tooltip) {
+        optionBtn.setAttribute("title", tooltip);
+      }
+      optionBtn.style.cssText = `
+                padding: 6px 8px;
+                border-radius: 6px;
+                border: 1px solid ${value === currentValue ? "#30b8c6" : "#4a5568"};
+                background-color: ${value === currentValue ? "#30b8c6" : "#2d3748"};
+                color: ${value === currentValue ? "#0a0e13" : "#f7fafc"};
+                font-size: 11px;
+                text-align: center;
+                cursor: pointer;
+                transition: background-color 0.2s, border-color 0.2s, color 0.2s;
+                white-space: nowrap;
+                overflow: hidden;
+                text-overflow: ellipsis;
+            `;
+      optionBtn.addEventListener("mouseenter", () => {
+        if (value !== currentValue) {
+          optionBtn.style.borderColor = "#30b8c6";
+          optionBtn.style.backgroundColor = "#4a5568";
+        }
+      });
+      optionBtn.addEventListener("mouseleave", () => {
+        if (value !== currentValue) {
+          optionBtn.style.borderColor = "#4a5568";
+          optionBtn.style.backgroundColor = "#2d3748";
+        }
+      });
+      optionBtn.addEventListener("click", () => {
+        onSelect(value);
+        renderOptionsMenu();
+        updateOptionsButtonLabel();
+        updateExportButtonLabel();
+      });
+      return optionBtn;
+    }
+
+    function appendOptionGroup(sectionEl, label, options, currentValue, onSelect) {
+      const group = document.createElement("div");
+      group.style.display = "flex";
+      group.style.flexDirection = "column";
+      group.style.gap = "6px";
+
+      if (label) {
+        const groupLabel = document.createElement("div");
+        groupLabel.textContent = label;
+        groupLabel.style.cssText = "font-size: 12px; font-weight: 600; color: #d1d5db;";
+        group.appendChild(groupLabel);
+      }
+
+      const list = document.createElement("div");
+      list.style.display = "grid";
+      list.style.gridTemplateColumns = "1fr 1fr";
+      list.style.gap = "4px";
+
+      options.forEach((opt) => {
+        list.appendChild(createOptionButton(opt.label, opt.value, currentValue, onSelect, opt.tooltip));
+      });
+
+      group.appendChild(list);
+      sectionEl.appendChild(group);
+    }
+
+    function renderOptionsMenu() {
+      const prefs = getPreferences();
+      menu.innerHTML = "";
+
+      const citationSection = document.createElement("div");
+      citationSection.style.display = "flex";
+      citationSection.style.flexDirection = "column";
+      citationSection.style.gap = "6px";
+
+      const citationHeading = document.createElement("div");
+      citationHeading.textContent = "Citation Style";
+      citationHeading.style.cssText = "font-size: 13px; font-weight: 700; color: #f9fafb;";
+      citationSection.appendChild(citationHeading);
+
+      appendOptionGroup(
+        citationSection,
+        "Format",
+        [
+          { label: "Endnotes", value: CITATION_STYLES.ENDNOTES, tooltip: CITATION_STYLE_DESCRIPTIONS[CITATION_STYLES.ENDNOTES] },
+          { label: "Inline", value: CITATION_STYLES.INLINE, tooltip: CITATION_STYLE_DESCRIPTIONS[CITATION_STYLES.INLINE] },
+          { label: "Parenthesized", value: CITATION_STYLES.PARENTHESIZED, tooltip: CITATION_STYLE_DESCRIPTIONS[CITATION_STYLES.PARENTHESIZED] },
+          { label: "Named", value: CITATION_STYLES.NAMED, tooltip: CITATION_STYLE_DESCRIPTIONS[CITATION_STYLES.NAMED] },
+          { label: "No Citations", value: CITATION_STYLES.NONE, tooltip: CITATION_STYLE_DESCRIPTIONS[CITATION_STYLES.NONE] },
+        ],
+        prefs.citationStyle,
+        (next) => GM_setValue("citationStyle", next)
+      );
+
+      menu.appendChild(citationSection);
+
+      const outputSection = document.createElement("div");
+      outputSection.style.display = "flex";
+      outputSection.style.flexDirection = "column";
+      outputSection.style.gap = "6px";
+
+      const outputHeading = document.createElement("div");
+      outputHeading.textContent = "Output Style";
+      outputHeading.style.cssText = "font-size: 13px; font-weight: 700; color: #f9fafb;";
+      outputSection.appendChild(outputHeading);
+
+      appendOptionGroup(
+        outputSection,
+        "Layout",
+        [
+          { label: "Full (User & Assistant)", value: FORMAT_STYLES.FULL },
+          { label: "Concise (content only)", value: FORMAT_STYLES.CONCISE },
+        ],
+        prefs.formatStyle,
+        (next) => GM_setValue("formatStyle", next)
+      );
+
+      appendOptionGroup(
+        outputSection,
+        "Spacing",
+        [
+          { label: "Standard", value: false },
+          { label: "Extra newlines", value: true },
+        ],
+        prefs.addExtraNewlines,
+        (next) => GM_setValue("addExtraNewlines", next)
+      );
+
+      menu.appendChild(outputSection);
+
+      const exportSection = document.createElement("div");
+      exportSection.style.display = "flex";
+      exportSection.style.flexDirection = "column";
+      exportSection.style.gap = "6px";
+
+      const exportHeading = document.createElement("div");
+      exportHeading.textContent = "Export Options";
+      exportHeading.style.cssText = "font-size: 13px; font-weight: 700; color: #f9fafb;";
+      exportSection.appendChild(exportHeading);
+
+      appendOptionGroup(
+        exportSection,
+        "Output Method",
+        [
+          { label: "Download File", value: EXPORT_METHODS.DOWNLOAD },
+          { label: "Copy to Clipboard", value: EXPORT_METHODS.CLIPBOARD },
+        ],
+        prefs.exportMethod,
+        (next) => GM_setValue("exportMethod", next)
+      );
+
+      appendOptionGroup(
+        exportSection,
+        "Extraction Method",
+        [
+          { label: "Comprehensive", value: EXTRACTION_METHODS.COMPREHENSIVE, tooltip: EXTRACTION_METHOD_DESCRIPTIONS[EXTRACTION_METHODS.COMPREHENSIVE] },
+          { label: "Direct (deprecated)", value: EXTRACTION_METHODS.DIRECT, tooltip: EXTRACTION_METHOD_DESCRIPTIONS[EXTRACTION_METHODS.DIRECT] },
+        ],
+        prefs.extractionMethod,
+        (next) => GM_setValue("extractionMethod", next)
+      );
+
+      menu.appendChild(exportSection);
+    }
+
+    function openMenu() {
+      renderOptionsMenu();
+      menu.style.display = "flex";
+      optionsButton.setAttribute("aria-expanded", "true");
+      optionsButton.style.backgroundColor = "#30b8c6";
+      document.addEventListener("mousedown", handleOutsideClick, true);
+      document.addEventListener("keydown", handleEscapeKey, true);
+    }
+
+    function closeMenu() {
+      menu.style.display = "none";
+      optionsButton.setAttribute("aria-expanded", "false");
+      optionsButton.style.backgroundColor = "#30b8c6";
+      document.removeEventListener("mousedown", handleOutsideClick, true);
+      document.removeEventListener("keydown", handleEscapeKey, true);
+    }
+
+    function toggleMenu() {
+      if (menu.style.display === "none" || menu.style.display === "") {
+        openMenu();
+      } else {
+        closeMenu();
+      }
+    }
+
+    function handleOutsideClick(event) {
+      if (!menu.contains(event.target) && !optionsButton.contains(event.target)) {
+        closeMenu();
+      }
+    }
+
+    function handleEscapeKey(event) {
+      if (event.key === "Escape") {
+        closeMenu();
+      }
+    }
+
+    optionsButton.addEventListener("click", (event) => {
+      event.stopPropagation();
+      toggleMenu();
+    });
+
+    optionsButton.addEventListener("mouseenter", () => {
+      optionsButton.style.backgroundColor = "#30b8c6";
+    });
+
+    optionsButton.addEventListener("mouseleave", () => {
+      optionsButton.style.backgroundColor = "#30b8c6";
+    });
+
+    updateOptionsButtonLabel();
+    updateExportButtonLabel();
+
+    const positionContainer = () => {
       let mainContainer = document.querySelector(".max-w-threadContentWidth") || document.querySelector('[class*="threadContentWidth"]');
 
-      // Strategy 2: Find the input area's parent container
       if (!mainContainer) {
         const inputArea = document.querySelector("textarea[placeholder]") || document.querySelector('[role="textbox"]') || document.querySelector("form");
         if (inputArea) {
-          // Walk up to find a container with reasonable width
           let parent = inputArea.parentElement;
           while (parent && parent !== document.body) {
             const width = parent.getBoundingClientRect().width;
-            // Look for a container that's likely the main content (not full width, not too narrow)
             if (width > 400 && width < window.innerWidth * 0.8) {
               mainContainer = parent;
               break;
@@ -1648,79 +1981,47 @@
         }
       }
 
-      // Strategy 3: Find main element
       if (!mainContainer) {
         mainContainer = document.querySelector("main") || document.querySelector('[role="main"]') || document.querySelector('[class*="main-content"]');
       }
 
       if (mainContainer) {
         const rect = mainContainer.getBoundingClientRect();
-
-        // Calculate center and apply directly without transition
         const centerX = rect.left + rect.width / 2;
-
-        // Force immediate positioning update by removing and re-adding styles
-        button.style.transition = "none";
-        button.style.left = `${centerX}px`;
-        button.style.transform = "translateX(-50%)";
-
-        // Re-enable transition after a moment
+        container.style.transition = "none";
+        container.style.left = `${centerX}px`;
+        container.style.transform = "translateX(-50%)";
         requestAnimationFrame(() => {
-          button.style.transition = "background-color 0.2s, left 0.2s";
+          container.style.transition = "left 0.2s";
         });
-
-        // Debug positioning
-        console.log("Button positioned at:", centerX, "Container width:", rect.width, "Container left:", rect.left);
+        console.log("Controls positioned at:", centerX, "Container width:", rect.width, "Container left:", rect.left);
       } else {
-        // Fallback to viewport center
-        button.style.transition = "none";
-        button.style.left = "50%";
-        button.style.transform = "translateX(-50%)";
+        container.style.transition = "none";
+        container.style.left = "50%";
+        container.style.transform = "translateX(-50%)";
         requestAnimationFrame(() => {
-          button.style.transition = "background-color 0.2s, left 0.2s";
+          container.style.transition = "left 0.2s";
         });
       }
     };
 
-    button.style.cssText = `
-            position: fixed;
-            bottom: 40px;
-            left: 50%;
-            transform: translateX(-50%);
-            padding: 4px 8px;
-            background-color: #30b8c6;
-            color: black;
-            border: none;
-            border-radius: 8px;
-            cursor: pointer;
-            font-size: 12px;
-            z-index: 99999;
-            font-weight: 600;
-            transition: background-color 0.2s, left 0.2s;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        `;
+    positionContainer();
 
-    // Position initially and on resize - use immediate execution
-    positionButton();
-
-    // Multiple event listeners for maximum responsiveness
     window.addEventListener("resize", () => {
       console.log("Window resize detected");
-      positionButton();
+      positionContainer();
     });
 
     window.addEventListener("orientationchange", () => {
       console.log("Orientation change detected");
-      setTimeout(positionButton, 100);
+      setTimeout(positionContainer, 100);
     });
 
-    // Watch for sidebar changes and layout updates with more aggressive observation
     const observer = new MutationObserver((mutations) => {
       console.log("DOM mutation detected:", mutations.length, "mutations");
-      positionButton();
+      positionContainer();
     });
 
-    // Observe body and html for any class/style changes
     observer.observe(document.body, {
       attributes: true,
       attributeFilter: ["class", "style"],
@@ -1733,94 +2034,106 @@
       subtree: false,
     });
 
-    // Use ResizeObserver on everything that could affect layout
     if (typeof ResizeObserver !== "undefined") {
       const resizeObserver = new ResizeObserver((entries) => {
         console.log("ResizeObserver triggered for", entries.length, "elements");
-        positionButton();
+        positionContainer();
       });
 
-      // Observe multiple elements immediately
       resizeObserver.observe(document.body);
       resizeObserver.observe(document.documentElement);
 
-      // Also observe any main containers we can find right now
-      const containers = [document.querySelector(".max-w-threadContentWidth"), document.querySelector('[class*="threadContentWidth"]'), document.querySelector("main"), document.querySelector('[role="main"]')].filter(Boolean);
+      const containers = [
+        document.querySelector(".max-w-threadContentWidth"),
+        document.querySelector('[class*="threadContentWidth"]'),
+        document.querySelector("main"),
+        document.querySelector('[role="main"]'),
+      ].filter(Boolean);
 
-      containers.forEach((container) => {
-        console.log("Observing container:", container);
-        resizeObserver.observe(container);
-        if (container.parentElement) {
-          resizeObserver.observe(container.parentElement);
+      containers.forEach((candidate) => {
+        console.log("Observing container:", candidate);
+        resizeObserver.observe(candidate);
+        if (candidate.parentElement) {
+          resizeObserver.observe(candidate.parentElement);
         }
       });
     }
 
-    // Also set up a periodic check as ultimate fallback
     setInterval(() => {
-      const currentLeft = parseFloat(button.style.left) || 0;
+      const currentLeft = parseFloat(container.style.left) || 0;
       const rect = (document.querySelector(".max-w-threadContentWidth") || document.querySelector('[class*="threadContentWidth"]') || document.querySelector("main"))?.getBoundingClientRect();
 
       if (rect) {
         const expectedX = rect.left + rect.width / 2;
-        // If button position is significantly off, reposition
         if (Math.abs(currentLeft - expectedX) > 20) {
-          console.log("Periodic check: repositioning button from", currentLeft, "to", expectedX);
-          positionButton();
+          console.log("Periodic check: repositioning controls from", currentLeft, "to", expectedX);
+          positionContainer();
         }
       }
-    }, 2000); // Check every 2 seconds
+    }, 2000);
 
-    button.addEventListener("mouseenter", () => {
-      button.style.backgroundColor = "#30b8c6";
+    exportButton.addEventListener("mouseenter", () => {
+      exportButton.style.backgroundColor = "#30b8c6";
     });
 
-    button.addEventListener("mouseleave", () => {
-      button.style.backgroundColor = "#30b8c6";
+    exportButton.addEventListener("mouseleave", () => {
+      exportButton.style.backgroundColor = "#30b8c6";
     });
 
-    button.addEventListener("click", async () => {
-      // Show loading state
-      const originalText = button.textContent;
-      button.textContent = "Exporting...";
-      button.disabled = true;
+    exportButton.addEventListener("click", async () => {
+      const originalText = exportButton.textContent;
+      exportButton.textContent = "Exporting...";
+      exportButton.disabled = true;
 
       const removeNavBlocker = installNavBlocker();
       try {
-        // Ensure window is focused before starting
         window.focus();
-
-        // Give user a moment to ensure focus
         await new Promise((resolve) => setTimeout(resolve, 500));
 
         const prefs = getPreferences();
-        const conversation = await extractConversation(prefs.citationStyle);
+        const conversation = await extractConversation(prefs.citationStyle, prefs.extractionMethod);
         if (conversation.length === 0) {
           alert("No conversation content found to export.");
           return;
         }
 
-        const title = document.title.replace(" | Perplexity", "").trim();
-        const safeTitle = title
-          .toLowerCase()
-          .replace(/[^a-z0-9]+/g, " ")
-          .replace(/^-+|-+$/g, "");
-        const filename = `${safeTitle}.md`;
-
         const markdown = formatMarkdown(conversation);
-        downloadMarkdown(markdown, filename);
+
+        if (prefs.exportMethod === EXPORT_METHODS.CLIPBOARD) {
+          const success = await copyToClipboard(markdown);
+          if (success) {
+            exportButton.textContent = "Copied!";
+            setTimeout(() => {
+              exportButton.textContent = originalText;
+            }, 2000);
+          } else {
+            alert("Failed to copy to clipboard. Please try again.");
+          }
+        } else {
+          const title = document.title.replace(" | Perplexity", "").trim();
+          const safeTitle = title
+            .toLowerCase()
+            .replace(/[^a-z0-9]+/g, " ")
+            .replace(/^-+|-+$/g, "");
+          const filename = `${safeTitle}.md`;
+          downloadMarkdown(markdown, filename);
+        }
       } catch (error) {
         console.error("Export failed:", error);
         alert("Export failed. Please try again.");
       } finally {
-        try { removeNavBlocker(); } catch {}
-        // Restore button state
-        button.textContent = originalText;
-        button.disabled = false;
+        try {
+          removeNavBlocker();
+        } catch {}
+        if (exportButton.textContent !== "Copied!") {
+          exportButton.textContent = originalText;
+        }
+        exportButton.disabled = false;
+        closeMenu();
       }
     });
 
-    document.body.appendChild(button);
+    document.body.appendChild(container);
   }
 
   // Initialize the script
