@@ -24,6 +24,16 @@ Configure the following settings via the `Options` button menu:
 - **Standard**: By default, this script does not put newlines between paragraphs and elements as markdown renderers do this visually. This makes rendered files appear cleaner but raw files harder to read.
 - **Extra Newlines**: This is the markdown spacing used by Perplexity with newlines before and after each element such as headers and paragraphs.
 
+### Frontmatter
+
+- **Include**: By default, this includes a Frontmatter section with title, date and url all dynamically inserted. 
+- **Exclude**: Leaves out the Frontmatter YAML section.
+
+### Title as H1
+
+- **Include**: Adds in the title as a level 1 header element.
+- **Exclude**: This is the default option.
+
 ## Export Options
 
 ### Output Method
