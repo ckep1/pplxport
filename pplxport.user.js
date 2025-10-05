@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Perplexity.ai Chat Exporter
 // @namespace    https://github.com/ckep1/pplxport
-// @version      2.2.0
+// @version      2.2.1
 // @description  Export Perplexity.ai conversations as markdown with configurable citation styles
 // @author       Chris Kephart
 // @match        https://www.perplexity.ai/*
@@ -422,7 +422,7 @@
   }
 
   function getViewportResponseButtons() {
-    const buttons = Array.from(document.querySelectorAll('button[aria-label="Copy"]')).filter((btn) => btn.querySelector("svg.tabler-icon-copy"));
+    const buttons = Array.from(document.querySelectorAll('button[aria-label="Copy"]')).filter((btn) => btn.querySelector("svg.tabler-icon"));
     return buttons.filter((btn) => isInViewport(btn) && !btn.closest("pre,code"));
   }
 
@@ -467,7 +467,7 @@
       roots.set(root, obj);
     }
 
-    const responseButtons = Array.from(document.querySelectorAll('button[aria-label="Copy"]')).filter((btn) => btn.querySelector("svg.tabler-icon-copy"));
+    const responseButtons = Array.from(document.querySelectorAll('button[aria-label="Copy"]')).filter((btn) => btn.querySelector("svg.tabler-icon"));
     for (const btn of responseButtons) {
       if (isCodeCopyButton(btn)) continue;
       const root = findAssistantMessageRootFrom(btn);
@@ -869,7 +869,7 @@
 
         // Only include conversation copy buttons
         const isQueryCopyButton = testId === "copy-query-button" || btn.getAttribute("aria-label") === "Copy Query";
-        const isResponseCopyButton = btn.getAttribute("aria-label") === "Copy" && btn.querySelector("svg.tabler-icon-copy");
+        const isResponseCopyButton = btn.getAttribute("aria-label") === "Copy" && btn.querySelector("svg.tabler-icon");
 
         if (isQueryCopyButton) {
           copyButtons.push({ el: btn, role: "User" });
