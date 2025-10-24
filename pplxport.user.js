@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Perplexity.ai Chat Exporter
 // @namespace    https://github.com/ckep1/pplxport
-// @version      2.2.2
+// @version      2.3.0
 // @description  Export Perplexity.ai conversations as markdown with configurable citation styles
 // @author       Chris Kephart
 // @match        https://www.perplexity.ai/*
@@ -24,6 +24,7 @@
   // Style options
   const CITATION_STYLES = {
     ENDNOTES: "endnotes",
+    FOOTNOTES: "footnotes",
     INLINE: "inline",
     PARENTHESIZED: "parenthesized",
     NAMED: "named",
@@ -32,6 +33,7 @@
 
   const CITATION_STYLE_LABELS = {
     [CITATION_STYLES.ENDNOTES]: "Endnotes",
+    [CITATION_STYLES.FOOTNOTES]: "Footnotes",
     [CITATION_STYLES.INLINE]: "Inline",
     [CITATION_STYLES.PARENTHESIZED]: "Parenthesized",
     [CITATION_STYLES.NAMED]: "Named",
@@ -40,6 +42,7 @@
 
   const CITATION_STYLE_DESCRIPTIONS = {
     [CITATION_STYLES.ENDNOTES]: "[1] in text with sources listed at the end",
+    [CITATION_STYLES.FOOTNOTES]: "[^1] in text with footnote definitions at the end",
     [CITATION_STYLES.INLINE]: "[1](url) - Clean inline citations",
     [CITATION_STYLES.PARENTHESIZED]: "([1](url)) - Inline citations in parentheses",
     [CITATION_STYLES.NAMED]: "[wikipedia](url) - Uses domain names",
@@ -66,20 +69,6 @@
     [EXPORT_METHODS.CLIPBOARD]: "Copy to Clipboard",
   };
 
-  const EXTRACTION_METHODS = {
-    COMPREHENSIVE: "comprehensive",
-    DIRECT: "direct",
-  };
-
-  const EXTRACTION_METHOD_LABELS = {
-    [EXTRACTION_METHODS.COMPREHENSIVE]: "Comprehensive",
-    [EXTRACTION_METHODS.DIRECT]: "Direct (deprecated)",
-  };
-
-  const EXTRACTION_METHOD_DESCRIPTIONS = {
-    [EXTRACTION_METHODS.COMPREHENSIVE]: "Uses copy buttons for reliable extraction with full citations. Slower but more reliable.",
-    [EXTRACTION_METHODS.DIRECT]: "Direct DOM parsing. DEPRECATED: Breaks with Perplexity site changes and misses citations by nature, but is faster.",
-  };
 
   // Global citation tracking for consistent numbering across all responses
   const globalCitations = {
@@ -124,7 +113,6 @@
       formatStyle: GM_getValue("formatStyle", FORMAT_STYLES.FULL),
       addExtraNewlines: GM_getValue("addExtraNewlines", false),
       exportMethod: GM_getValue("exportMethod", EXPORT_METHODS.DOWNLOAD),
-      extractionMethod: GM_getValue("extractionMethod", EXTRACTION_METHODS.COMPREHENSIVE),
       includeFrontmatter: GM_getValue("includeFrontmatter", true),
       titleAsH1: GM_getValue("titleAsH1", false),
     };
@@ -952,98 +940,11 @@
     }
   }
 
-  // Direct/Fast extraction method (Method 5)
-  async function extractByDirectDomParsing(citationStyle) {
-    console.log("Using direct DOM parsing (fast method)...");
-    const conversation = [];
-    const seenUserQueries = new Set();
-
-    // Find the main thread container
-    const threadContainer = document.querySelector('.max-w-threadContentWidth, [class*="threadContentWidth"]');
-
-    if (threadContainer) {
-      // Get ALL divs in the thread container, process them in document order
-      const allDivs = threadContainer.querySelectorAll("div");
-
-      allDivs.forEach((div) => {
-        // Check if this div contains a user query (multiple possible structures)
-        const userQuerySelectors = [
-          ".whitespace-pre-line.text-pretty.break-words", // Original working selector
-          "span[data-lexical-text='true']", // New structure selector
-          ".group\\/query span[data-lexical-text='true']", // Grouped queries
-          "h1.group\\/query span[data-lexical-text='true']", // H1 queries
-        ];
-
-        let foundUserQuery = false;
-        for (const selector of userQuerySelectors) {
-          const userQuery = div.querySelector(selector);
-          if (userQuery) {
-            const content = userQuery.textContent.trim();
-            if (content && content.length > 10 && !seenUserQueries.has(content)) {
-              seenUserQueries.add(content);
-              conversation.push({
-                role: "User",
-                content: content,
-              });
-              foundUserQuery = true;
-              break; // Stop looking once we find a query in this div
-            }
-          }
-        }
-
-        // If no user query found in this div, check for assistant response
-        if (!foundUserQuery) {
-          const assistantResponse = div.querySelector(".prose.text-pretty.dark\\:prose-invert");
-          if (assistantResponse) {
-            const answerContent = assistantResponse.cloneNode(true);
-            conversation.push({
-              role: "Assistant",
-              content: htmlToMarkdown(answerContent.innerHTML, citationStyle),
-            });
-          }
-        }
-      });
-    }
-
-    // Fallback: if we didn't find conversations, try the simple original method
-    if (conversation.length === 0) {
-      // Just get user queries and assistant responses in document order
-      document.querySelectorAll(".whitespace-pre-line.text-pretty.break-words, span[data-lexical-text='true'], .prose.text-pretty.dark\\:prose-invert").forEach((element) => {
-        if (element.matches(".prose.text-pretty.dark\\:prose-invert")) {
-          // Assistant response
-          const answerContent = element.cloneNode(true);
-          conversation.push({
-            role: "Assistant",
-            content: htmlToMarkdown(answerContent.innerHTML, citationStyle),
-          });
-        } else {
-          // User query
-          const content = element.textContent.trim();
-          if (content && content.length > 10 && !seenUserQueries.has(content)) {
-            seenUserQueries.add(content);
-            conversation.push({
-              role: "User",
-              content: content,
-            });
-          }
-        }
-      });
-    }
-
-    console.log(`Direct method found ${conversation.length} items`);
-    return conversation;
-  }
 
   // MAIN EXTRACTION ORCHESTRATOR
-  async function extractConversation(citationStyle, extractionMethod = EXTRACTION_METHODS.COMPREHENSIVE) {
+  async function extractConversation(citationStyle) {
     // Reset global citation tracking
     globalCitations.reset();
-
-    // If direct method is selected, use it immediately
-    if (extractionMethod === EXTRACTION_METHODS.DIRECT) {
-      console.log("✅ Using Direct extraction method");
-      return await extractByDirectDomParsing(citationStyle);
-    }
 
     // Method 1: Page-down with button clicking (most reliable)
     // Uses Perplexity's native copy buttons to extract exact content
@@ -1078,17 +979,8 @@
       return copyButtonApproach;
     }
 
-    // Method 4: Direct DOM parsing (final fallback)
-    // Parses visible DOM elements without any scrolling
-    console.log("Trying Method 4: Direct DOM parsing fallback...");
-    const fallbackResult = await extractByDirectDomParsing(citationStyle);
-    console.log(`Method 4 found ${fallbackResult.length} items`);
-    if (fallbackResult.length > 0) {
-      console.log("✅ Using Method 4: Direct DOM parsing");
-    } else {
-      console.log("❌ No content found with any method");
-    }
-    return fallbackResult;
+    console.log("❌ No content found with any method");
+    return [];
   }
 
   // ============================================================================
@@ -1157,6 +1049,15 @@
         .join("");
     }
 
+    function buildFootnotesRun(localNums) {
+      return localNums
+        .map((n) => {
+          const g = localToGlobalMap.get(n) || n;
+          return `[^${g}]`;
+        })
+        .join("");
+    }
+
     function buildInlineRun(localNums) {
       return localNums
         .map((n) => {
@@ -1198,6 +1099,7 @@
       if (nums.length === 0) return run;
       if (citationStyle === CITATION_STYLES.NONE) return ""; // Remove citations completely
       if (citationStyle === CITATION_STYLES.ENDNOTES) return buildEndnotesRun(nums);
+      if (citationStyle === CITATION_STYLES.FOOTNOTES) return buildFootnotesRun(nums);
       if (citationStyle === CITATION_STYLES.INLINE) return buildInlineRun(nums);
       if (citationStyle === CITATION_STYLES.PARENTHESIZED) return buildParenthesizedRun(nums);
       if (citationStyle === CITATION_STYLES.NAMED) return buildNamedRun(nums);
@@ -1388,6 +1290,8 @@
               citationText = ` ([${number}](${citationUrl})) `;
             } else if (citationStyle === CITATION_STYLES.NAMED && sourceName) {
               citationText = ` [${sourceName}](${citationUrl}) `;
+            } else if (citationStyle === CITATION_STYLES.FOOTNOTES) {
+              citationText = ` [^${number}] `;
             } else {
               citationText = ` [${number}] `;
             }
@@ -1539,6 +1443,14 @@
       }
     }
 
+    // Add footnote definitions at the bottom for footnotes style
+    if (citationStyle === CITATION_STYLES.FOOTNOTES && citationRefs.size > 0) {
+      text += "\n\n";
+      for (const [number, { href }] of citationRefs) {
+        text += `[^${number}]: ${href}\n`;
+      }
+    }
+
     return text;
   }
 
@@ -1604,6 +1516,14 @@
         markdown += `\n[${number}] ${href}`;
       }
       markdown += "\n"; // Add final newline
+    }
+
+    // Add global footnote definitions at the end for footnotes style
+    if (prefs.citationStyle === CITATION_STYLES.FOOTNOTES && globalCitations.citationRefs.size > 0) {
+      markdown += "\n\n";
+      for (const [number, { href }] of globalCitations.citationRefs) {
+        markdown += `[^${number}]: ${href}\n`;
+      }
     }
 
     return markdown.trim(); // Trim any trailing whitespace at the very end
@@ -1853,6 +1773,7 @@
         "Format",
         [
           { label: "Endnotes", value: CITATION_STYLES.ENDNOTES, tooltip: CITATION_STYLE_DESCRIPTIONS[CITATION_STYLES.ENDNOTES] },
+          { label: "Footnotes", value: CITATION_STYLES.FOOTNOTES, tooltip: CITATION_STYLE_DESCRIPTIONS[CITATION_STYLES.FOOTNOTES] },
           { label: "Inline", value: CITATION_STYLES.INLINE, tooltip: CITATION_STYLE_DESCRIPTIONS[CITATION_STYLES.INLINE] },
           { label: "Parenthesized", value: CITATION_STYLES.PARENTHESIZED, tooltip: CITATION_STYLE_DESCRIPTIONS[CITATION_STYLES.PARENTHESIZED] },
           { label: "Named", value: CITATION_STYLES.NAMED, tooltip: CITATION_STYLE_DESCRIPTIONS[CITATION_STYLES.NAMED] },
@@ -1941,17 +1862,6 @@
         ],
         prefs.exportMethod,
         (next) => GM_setValue("exportMethod", next)
-      );
-
-      appendOptionGroup(
-        exportSection,
-        "Extraction Method",
-        [
-          { label: "Comprehensive", value: EXTRACTION_METHODS.COMPREHENSIVE, tooltip: EXTRACTION_METHOD_DESCRIPTIONS[EXTRACTION_METHODS.COMPREHENSIVE] },
-          { label: "Direct (deprecated)", value: EXTRACTION_METHODS.DIRECT, tooltip: EXTRACTION_METHOD_DESCRIPTIONS[EXTRACTION_METHODS.DIRECT] },
-        ],
-        prefs.extractionMethod,
-        (next) => GM_setValue("extractionMethod", next)
       );
 
       menu.appendChild(exportSection);
@@ -2138,7 +2048,7 @@
         await new Promise((resolve) => setTimeout(resolve, 500));
 
         const prefs = getPreferences();
-        const conversation = await extractConversation(prefs.citationStyle, prefs.extractionMethod);
+        const conversation = await extractConversation(prefs.citationStyle);
         if (conversation.length === 0) {
           alert("No conversation content found to export.");
           return;

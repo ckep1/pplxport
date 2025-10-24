@@ -7,8 +7,9 @@ Configure the following settings via the `Options` button menu:
 ## Citation Style
 
 - **Inline**: `[1](url)` - Clean inline citations
-- **Parenthesized** (default): `([1](url))` - Inline citations wrapped in parentheses  
+- **Parenthesized** (default): `([1](url))` - Inline citations wrapped in parentheses
 - **Endnotes**: `[1]` in text with sources listed at the end
+- **Footnotes**: `[^1]` in text with footnote definitions at the end (standard markdown format)
 - **Named**: `[source](url)` - Uses domain names like `[wikipedia](url)`
 - **No Citations**: Removes all citations for answer text only.
 
@@ -40,8 +41,3 @@ Configure the following settings via the `Options` button menu:
 
 - **Download File**: Downloads a .md file.
 - **Copy to Clipboard**: Copies the entire conversation with this formatting to the clipboard, no file saved.
-
-### Extraction Method
-
-- **Comprehensive (Recommended)**: Uses the copy buttons for consistent exports with all citations. Requires clipboard usage.
-- **Direct (Deprecated)**: Uses the DOM to export the content directly from the rendered HTML on the page. Deprecated due to missing nested citations, it only gets the first link. It misses parts of long conversations due to the way Perplexity loads long conversations. This method also breaks with site changes. Despite the downsides, it is faster and does not require the clipboard.
