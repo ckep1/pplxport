@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Perplexity.ai Chat Exporter
 // @namespace    https://github.com/ckep1/pplxport
-// @version      2.3.0
+// @version      2.3.1
 // @description  Export Perplexity.ai conversations as markdown with configurable citation styles
 // @author       Chris Kephart
 // @match        https://www.perplexity.ai/*
@@ -334,9 +334,33 @@
     }
   }
 
+  async function waitForFocus(timeoutMs = 30000) {
+    if (document.hasFocus()) return true;
+
+    const startTime = Date.now();
+    const overlay = document.getElementById('perplexity-focus-overlay');
+    if (overlay) overlay.style.display = 'flex';
+
+    while (!document.hasFocus() && (Date.now() - startTime) < timeoutMs) {
+      window.focus();
+      await new Promise(r => setTimeout(r, 100));
+    }
+
+    if (overlay) overlay.style.display = 'none';
+    return document.hasFocus();
+  }
+
   async function readClipboardWithRetries(maxRetries = 3, delayMs = 60) {
     let last = "";
     for (let i = 0; i < maxRetries; i++) {
+      // Wait for focus before attempting clipboard read
+      if (!document.hasFocus()) {
+        const gotFocus = await waitForFocus(10000);
+        if (!gotFocus) {
+          console.warn('Lost focus during clipboard read, retrying...');
+        }
+      }
+
       try {
         const text = await navigator.clipboard.readText();
         if (text && text.trim() && text !== last) {
@@ -2091,6 +2115,41 @@
     });
 
     document.body.appendChild(container);
+
+    // Add focus overlay for when user clicks away during export
+    const focusOverlay = document.createElement('div');
+    focusOverlay.id = 'perplexity-focus-overlay';
+    focusOverlay.style.cssText = `
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: rgba(0, 0, 0, 0.7);
+      display: none;
+      justify-content: center;
+      align-items: center;
+      z-index: 999999;
+      cursor: pointer;
+    `;
+    focusOverlay.innerHTML = `
+      <div style="
+        background: #1F2121;
+        color: white;
+        padding: 24px 32px;
+        border-radius: 12px;
+        text-align: center;
+        box-shadow: 0 12px 24px rgba(0, 0, 0, 0.4);
+      ">
+        <div style="font-size: 18px; font-weight: 600; margin-bottom: 8px;">Click here to continue export</div>
+        <div style="font-size: 14px; color: #9ca3af;">Export paused - page needs focus to read clipboard</div>
+      </div>
+    `;
+    focusOverlay.addEventListener('click', () => {
+      window.focus();
+      focusOverlay.style.display = 'none';
+    });
+    document.body.appendChild(focusOverlay);
   }
 
   // Initialize the script
