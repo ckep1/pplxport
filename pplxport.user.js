@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Perplexity.ai Chat Exporter
 // @namespace    https://github.com/ckep1/pplxport
-// @version      2.3.1
+// @version      2.3.2
 // @description  Export Perplexity.ai conversations as markdown with configurable citation styles
 // @author       Chris Kephart
 // @match        https://www.perplexity.ai/*
@@ -1130,7 +1130,18 @@
       return run;
     });
 
-    // Citations processed and remapped to global numbers
+    // Handle named citation links: [domain](url) format from newer Perplexity clipboard
+    content = content.replace(/\[([^\]\n]{1,40})\]\((https?:\/\/[^)]+)\)/g, (match, text, url) => {
+      if (/^\d+$/.test(text) || /\s/.test(text)) return match;
+      const globalNum = globalCitations.addCitation(url);
+      if (citationStyle === CITATION_STYLES.NONE) return "";
+      if (citationStyle === CITATION_STYLES.ENDNOTES) return `[${globalNum}]`;
+      if (citationStyle === CITATION_STYLES.FOOTNOTES) return `[^${globalNum}]`;
+      if (citationStyle === CITATION_STYLES.INLINE) return `[${globalNum}](${url})`;
+      if (citationStyle === CITATION_STYLES.PARENTHESIZED) return `([${globalNum}](${url}))`;
+      if (citationStyle === CITATION_STYLES.NAMED) return `[${text}](${url})`;
+      return match;
+    });
 
     // Clean up any excessive parentheses sequences that might have been created
     // Collapse 3+ to 2 and remove spaces before punctuation
@@ -1183,7 +1194,7 @@
     // Process citations - updated for new structure with proper URL-based tracking
     const citations = [
       ...tempDiv.querySelectorAll("a.citation"), // Old structure
-      ...tempDiv.querySelectorAll(".citation.inline"), // New structure
+      ...tempDiv.querySelectorAll(".citation:not(a)"), // New structure (covers .citation.inline, .citation.inline-flex, etc.)
     ];
 
     // Track unique sources by normalized URL
@@ -1201,8 +1212,8 @@
       if (citation.tagName === "A" && citation.classList.contains("citation")) {
         href = citation.getAttribute("href");
       }
-      // Handle new structure (.citation.inline)
-      else if (citation.classList.contains("citation") && citation.classList.contains("inline")) {
+      // Handle new structure (span.citation with nested anchor)
+      else if (citation.classList.contains("citation") && citation.tagName !== "A") {
         // Get source name from aria-label or nested text
         const ariaLabel = citation.getAttribute("aria-label");
         if (ariaLabel) {
@@ -1219,6 +1230,12 @@
             // Check if this is a multi-citation (has +N format)
             isMultiCitation = /\+\d+$/.test(spanText.trim());
           }
+        }
+
+        // If still no source name, try the citation's text content
+        if (!sourceName) {
+          const text = citation.textContent.trim();
+          if (text) sourceName = extractSourceName(text);
         }
 
         // Get href from nested anchor
@@ -1260,8 +1277,8 @@
       if (el.tagName === "A" && el.classList.contains("citation")) {
         href = el.getAttribute("href");
       }
-      // Handle new structure (.citation.inline)
-      else if (el.classList.contains("citation") && el.classList.contains("inline")) {
+      // Handle new structure (span.citation with nested anchor)
+      else if (el.classList.contains("citation") && el.tagName !== "A") {
         // Get source name from aria-label or nested text
         const ariaLabel = el.getAttribute("aria-label");
         if (ariaLabel) {
@@ -1275,6 +1292,11 @@
             sourceName = extractSourceName(spanText);
             isMultiCitation = /\+\d+$/.test(spanText.trim());
           }
+        }
+
+        if (!sourceName) {
+          const text = el.textContent.trim();
+          if (text) sourceName = extractSourceName(text);
         }
 
         // Get href from nested anchor
