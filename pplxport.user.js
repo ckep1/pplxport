@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Perplexity.ai Chat Exporter
 // @namespace    https://github.com/ckep1/pplxport
-// @version      2.3.2
+// @version      2.4.0
 // @description  Export Perplexity.ai conversations as markdown with configurable citation styles
 // @author       Chris Kephart
 // @match        https://www.perplexity.ai/*
@@ -556,7 +556,8 @@
             const hash = raw.substring(0, 200) + raw.substring(Math.max(0, raw.length - 50)) + raw.length;
             if (!processedContent.has(hash)) {
               processedContent.add(hash);
-              const processedMarkdown = processCopiedMarkdown(raw, citationStyle);
+              const multiCitMap = extractMultiCitationMap(btn);
+              const processedMarkdown = processCopiedMarkdown(raw, citationStyle, multiCitMap);
               conversation.push({ role: "Assistant", content: processedMarkdown });
               processedSomething = true;
             }
@@ -754,7 +755,8 @@
               const contentHash = raw.substring(0, 200) + raw.substring(Math.max(0, raw.length - 50)) + raw.length;
               if (!processedContent.has(contentHash)) {
                 processedContent.add(contentHash);
-                const processedMarkdown = processCopiedMarkdown(raw, citationStyle);
+                const multiCitMap = extractMultiCitationMap(responseButton);
+                const processedMarkdown = processCopiedMarkdown(raw, citationStyle, multiCitMap);
                 conversation.push({ role: "Assistant", content: processedMarkdown });
                 processedSomethingThisPass = true;
               }
@@ -799,7 +801,8 @@
             const contentHash = raw.substring(0, 200) + raw.substring(Math.max(0, raw.length - 50)) + raw.length;
             if (!processedContent.has(contentHash)) {
               processedContent.add(contentHash);
-              const processedMarkdown = processCopiedMarkdown(raw, citationStyle);
+              const multiCitMap = extractMultiCitationMap(responseButton);
+              const processedMarkdown = processCopiedMarkdown(raw, citationStyle, multiCitMap);
               conversation.push({ role: "Assistant", content: processedMarkdown });
             }
           }
@@ -950,7 +953,8 @@
                 content: trimmedContent,
               });
             } else {
-              const processedMarkdown = processCopiedMarkdown(clipboardText, citationStyle);
+              const multiCitMap = extractMultiCitationMap(button);
+              const processedMarkdown = processCopiedMarkdown(clipboardText, citationStyle, multiCitMap);
               conversation.push({
                 role: "Assistant",
                 content: processedMarkdown,
@@ -1011,8 +1015,42 @@
   // MARKDOWN PROCESSING FUNCTIONS
   // ============================================================================
 
+  function extractMultiCitationMap(responseButton) {
+    const responseRoot = findAssistantMessageRootFrom(responseButton);
+    if (!responseRoot) return null;
+
+    const citations = responseRoot.querySelectorAll('.citation');
+    if (citations.length === 0) return null;
+
+    const fiberKey = Object.keys(citations[0]).find(k => k.startsWith('__reactFiber'));
+    if (!fiberKey) return null;
+
+    const map = new Map();
+
+    for (const citEl of citations) {
+      let node = citEl[fiberKey];
+      for (let i = 0; i < 25 && node; i++) {
+        const props = node.memoizedProps || node.pendingProps;
+        if (props?.citationGroup?.isGrouped && props?.webResults?.length > 1) {
+          const urls = props.webResults.map(wr => wr.url).filter(Boolean);
+          if (urls.length > 1) {
+            const primaryNorm = normalizeUrl(urls[0]);
+            if (!map.has(primaryNorm)) {
+              map.set(primaryNorm, urls);
+            }
+          }
+          break;
+        }
+        if (props?.citationGroup) break;
+        node = node.return;
+      }
+    }
+
+    return map.size > 0 ? map : null;
+  }
+
   // Process copied markdown and convert citations to desired style with global consolidation
-  function processCopiedMarkdown(markdown, citationStyle) {
+  function processCopiedMarkdown(markdown, citationStyle, multiCitationMap = null) {
     // The copied format already has [N] citations and numbered URL references at bottom
 
     // Extract the numbered references section (at bottom of each response)
@@ -1133,6 +1171,24 @@
     // Handle named citation links: [domain](url) format from newer Perplexity clipboard
     content = content.replace(/\[([^\]\n]{1,40})\]\((https?:\/\/[^)]+)\)/g, (match, text, url) => {
       if (/^\d+$/.test(text) || /\s/.test(text)) return match;
+
+      const companionUrls = multiCitationMap?.get(normalizeUrl(url));
+      if (companionUrls && companionUrls.length > 1) {
+        const globalNums = companionUrls.map(u => {
+          const gn = globalCitations.addCitation(u);
+          localReferences.set(String(gn), u);
+          localToGlobalMap.set(String(gn), gn);
+          return gn;
+        });
+        const localNums = globalNums.map(String);
+        if (citationStyle === CITATION_STYLES.NONE) return "";
+        if (citationStyle === CITATION_STYLES.ENDNOTES) return buildEndnotesRun(localNums);
+        if (citationStyle === CITATION_STYLES.FOOTNOTES) return buildFootnotesRun(localNums);
+        if (citationStyle === CITATION_STYLES.INLINE) return buildInlineRun(localNums);
+        if (citationStyle === CITATION_STYLES.PARENTHESIZED) return buildParenthesizedRun(localNums);
+        if (citationStyle === CITATION_STYLES.NAMED) return buildNamedRun(localNums);
+      }
+
       const globalNum = globalCitations.addCitation(url);
       if (citationStyle === CITATION_STYLES.NONE) return "";
       if (citationStyle === CITATION_STYLES.ENDNOTES) return `[${globalNum}]`;
