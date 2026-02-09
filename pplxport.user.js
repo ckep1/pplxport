@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Perplexity.ai Chat Exporter
 // @namespace    https://github.com/ckep1/pplxport
-// @version      2.4.0
+// @version      2.4.1
 // @description  Export Perplexity.ai conversations as markdown with configurable citation styles
 // @author       Chris Kephart
 // @match        https://www.perplexity.ai/*
@@ -45,7 +45,7 @@
     [CITATION_STYLES.FOOTNOTES]: "[^1] in text with footnote definitions at the end",
     [CITATION_STYLES.INLINE]: "[1](url) - Clean inline citations",
     [CITATION_STYLES.PARENTHESIZED]: "([1](url)) - Inline citations in parentheses",
-    [CITATION_STYLES.NAMED]: "[wikipedia](url) - Uses domain names",
+    [CITATION_STYLES.NAMED]: "([wikipedia](url)) - Uses domain names",
     [CITATION_STYLES.NONE]: "Remove all citations from the text",
   };
 
@@ -1195,7 +1195,7 @@
       if (citationStyle === CITATION_STYLES.FOOTNOTES) return `[^${globalNum}]`;
       if (citationStyle === CITATION_STYLES.INLINE) return `[${globalNum}](${url})`;
       if (citationStyle === CITATION_STYLES.PARENTHESIZED) return `([${globalNum}](${url}))`;
-      if (citationStyle === CITATION_STYLES.NAMED) return `[${text}](${url})`;
+      if (citationStyle === CITATION_STYLES.NAMED) return `([${text}](${url}))`;
       return match;
     });
 
@@ -1378,7 +1378,7 @@
             if (citationStyle === CITATION_STYLES.NONE) {
               citationText = ""; // Remove citation completely
             } else if (citationStyle === CITATION_STYLES.NAMED && sourceName) {
-              citationText = ` [${sourceName} +${count} more](${citationUrl}) `;
+              citationText = ` ([${sourceName} +${count} more](${citationUrl})) `;
             } else {
               citationText = ` [${number} +${count} more](${citationUrl}) `;
             }
@@ -1391,7 +1391,7 @@
             } else if (citationStyle === CITATION_STYLES.PARENTHESIZED) {
               citationText = ` ([${number}](${citationUrl})) `;
             } else if (citationStyle === CITATION_STYLES.NAMED && sourceName) {
-              citationText = ` [${sourceName}](${citationUrl}) `;
+              citationText = ` ([${sourceName}](${citationUrl})) `;
             } else if (citationStyle === CITATION_STYLES.FOOTNOTES) {
               citationText = ` [^${number}] `;
             } else {
