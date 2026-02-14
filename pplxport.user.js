@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Perplexity.ai Chat Exporter
 // @namespace    https://github.com/ckep1/pplxport
-// @version      2.4.1
+// @version      2.5.0
 // @description  Export Perplexity.ai conversations as markdown with configurable citation styles
 // @author       Chris Kephart
 // @match        https://www.perplexity.ai/*
@@ -499,6 +499,202 @@
     }
 
     return Array.from(roots.values()).sort((a, b) => a.top - b.top);
+  }
+
+  // ============================================================================
+  // DEEP RESEARCH DETECTION & HELPERS
+  // ============================================================================
+
+  function isDeepResearch() {
+    if (document.querySelector('[class*="search-side-content"]')) return true;
+    if (document.querySelector('button[data-testid="asset-card-open-button"]')) return true;
+    return false;
+  }
+
+  async function openDeepResearchPanel() {
+    if (document.querySelector('[class*="search-side-content"]')) return true;
+    const cardBtn = document.querySelector('button[data-testid="asset-card-open-button"]');
+    if (!cardBtn) return false;
+    cardBtn.click();
+    for (let i = 0; i < 30; i++) {
+      await new Promise(r => setTimeout(r, 200));
+      if (document.querySelector('[class*="search-side-content"]')) return true;
+    }
+    return false;
+  }
+
+  async function interceptExportMarkdown() {
+    const origAnchorClick = HTMLAnchorElement.prototype.click;
+    let capturedText = null;
+
+    // Intercept anchor clicks to capture the data URL content and block the download
+    HTMLAnchorElement.prototype.click = function() {
+      if (this.download && this.href?.startsWith('data:')) {
+        try {
+          const encoded = this.href.split(',')[1];
+          const prefix = this.href.split(',')[0];
+          if (prefix.includes('base64')) {
+            const bytes = Uint8Array.from(atob(encoded), c => c.charCodeAt(0));
+            capturedText = new TextDecoder().decode(bytes);
+          } else {
+            capturedText = decodeURIComponent(encoded);
+          }
+        } catch {}
+        return;
+      }
+      return origAnchorClick.call(this);
+    };
+
+    try {
+      // Open the Export dropdown (Radix needs focus + keyboard Enter)
+      const exportBtn = Array.from(document.querySelectorAll('button[aria-haspopup="menu"]'))
+        .find(b => b.textContent.includes('Export'));
+      if (!exportBtn) throw new Error('Export button not found in side panel');
+      exportBtn.focus();
+      exportBtn.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true }));
+      exportBtn.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', bubbles: true }));
+      await new Promise(r => setTimeout(r, 500));
+
+      // Click "Download as Markdown" menu item
+      const menuItem = Array.from(document.querySelectorAll('[role="menuitem"]'))
+        .find(m => m.textContent.includes('Download as Markdown'));
+      if (!menuItem) throw new Error('Download as Markdown menu item not found');
+      menuItem.click();
+
+      // Wait for capture
+      for (let i = 0; i < 30; i++) {
+        await new Promise(r => setTimeout(r, 100));
+        if (capturedText) break;
+      }
+
+      return capturedText;
+    } finally {
+      HTMLAnchorElement.prototype.click = origAnchorClick;
+    }
+  }
+
+  function reformatDeepResearchMarkdown(rawMd, citationStyle) {
+    // Split off the References section
+    const refSplitPattern = /\n---\s*\n+## References\s*\n|(?:^|\n)## References\s*\n/;
+    const parts = rawMd.split(refSplitPattern);
+    let body = parts[0];
+    const refsBlock = parts.length > 1 ? parts[1] : '';
+
+    // Build citation number -> URL map from references
+    // Format: "N. [Title](URL) - Description..."
+    const citationUrlMap = new Map(); // number string -> { url, title }
+    if (refsBlock) {
+      const refLines = refsBlock.split('\n');
+      for (const line of refLines) {
+        const match = line.match(/^(\d+)\.\s+\[([^\]]*)\]\(([^)]+)\)/);
+        if (match) {
+          citationUrlMap.set(match[1], { title: match[2], url: match[3] });
+        }
+      }
+    }
+
+    // Register all references with globalCitations for consistent numbering
+    const localToGlobalMap = new Map(); // local ref number -> global citation number
+    for (const [localNum, { url }] of citationUrlMap) {
+      const globalNum = globalCitations.addCitation(url);
+      localToGlobalMap.set(localNum, globalNum);
+    }
+
+    // Replace [^N] footnote citations according to citationStyle
+    if (citationStyle === CITATION_STYLES.NONE) {
+      body = body.replace(/\[\^\d+\]/g, '');
+    } else {
+      // Replace runs of consecutive footnote citations like [^1][^2][^3]
+      body = body.replace(/(?:\[\^\d+\])+/g, (run) => {
+        const nums = Array.from(run.matchAll(/\[\^(\d+)\]/g)).map(m => m[1]);
+        if (nums.length === 0) return run;
+
+        return nums.map(localNum => {
+          const globalNum = localToGlobalMap.get(localNum) || localNum;
+          const ref = citationUrlMap.get(localNum);
+          const url = ref?.url || '';
+
+          switch (citationStyle) {
+            case CITATION_STYLES.ENDNOTES:
+              return `[${globalNum}]`;
+            case CITATION_STYLES.FOOTNOTES:
+              return `[^${globalNum}]`;
+            case CITATION_STYLES.INLINE:
+              return url ? `[${globalNum}](${url})` : `[${globalNum}]`;
+            case CITATION_STYLES.PARENTHESIZED:
+              return url ? `([${globalNum}](${url}))` : `([${globalNum}])`;
+            case CITATION_STYLES.NAMED: {
+              const domain = extractDomainName(url) || 'source';
+              return url ? `([${domain}](${url}))` : `([${domain}])`;
+            }
+            default:
+              return `[^${globalNum}]`;
+          }
+        }).join('');
+      });
+    }
+
+    // Append citation list at end for styles that need it
+    if (citationStyle === CITATION_STYLES.ENDNOTES && globalCitations.citationRefs.size > 0) {
+      body += '\n\n### Sources\n';
+      for (const [number, { href }] of globalCitations.citationRefs) {
+        body += `[${number}] ${href}\n`;
+      }
+    }
+
+    if (citationStyle === CITATION_STYLES.FOOTNOTES && globalCitations.citationRefs.size > 0) {
+      body += '\n\n';
+      for (const [number, { href }] of globalCitations.citationRefs) {
+        body += `[^${number}]: ${href}\n`;
+      }
+    }
+
+    return body.trim();
+  }
+
+  async function exportDeepResearch() {
+    const prefs = getPreferences();
+    globalCitations.reset();
+
+    // Open side panel if needed
+    const panelOpened = await openDeepResearchPanel();
+    if (!panelOpened) {
+      console.warn('Failed to open deep research side panel');
+      return null;
+    }
+
+    // Wait a moment for panel to fully render
+    await new Promise(r => setTimeout(r, 500));
+
+    // Get raw markdown via export interception
+    const rawMd = await interceptExportMarkdown();
+    if (!rawMd) {
+      console.warn('Failed to capture exported markdown');
+      return null;
+    }
+
+    // Reformat citations
+    const content = reformatDeepResearchMarkdown(rawMd, prefs.citationStyle);
+
+    // Build final document
+    let markdown = '';
+
+    // Extract title from first H1 in content
+    const titleMatch = content.match(/^# (.+)$/m);
+    const title = titleMatch ? titleMatch[1] : document.title.replace(/ - Perplexity$/, '').replace(/ \| Perplexity$/, '').trim();
+
+    if (prefs.includeFrontmatter) {
+      const timestamp = new Date().toISOString().split('T')[0];
+      markdown += `---\ntitle: ${title}\ndate: ${timestamp}\nsource: ${window.location.href}\n---\n\n`;
+    }
+
+    if (prefs.titleAsH1 && !content.startsWith('# ')) {
+      markdown += `# ${title}\n\n`;
+    }
+
+    markdown += content;
+
+    return markdown.trim();
   }
 
   // ============================================================================
@@ -2150,6 +2346,38 @@
         await new Promise((resolve) => setTimeout(resolve, 500));
 
         const prefs = getPreferences();
+        const title = document.title.replace(" | Perplexity", "").replace(/ - Perplexity$/, "").trim();
+        const safeTitle = title
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, " ")
+          .replace(/^-+|-+$/g, "");
+        const filename = `${safeTitle}.md`;
+
+        // Deep research branch: use export interception instead of DOM scraping
+        if (isDeepResearch()) {
+          console.log("Deep research detected, using export interception...");
+          const markdown = await exportDeepResearch();
+          if (!markdown) {
+            alert("Failed to export deep research content. Please try again.");
+            return;
+          }
+          if (prefs.exportMethod === EXPORT_METHODS.CLIPBOARD) {
+            const success = await copyToClipboard(markdown);
+            if (success) {
+              exportButton.textContent = "Copied!";
+              setTimeout(() => {
+                exportButton.textContent = originalText;
+              }, 2000);
+            } else {
+              alert("Failed to copy to clipboard. Please try again.");
+            }
+          } else {
+            downloadMarkdown(markdown, filename);
+          }
+          return;
+        }
+
+        // Standard conversation export
         const conversation = await extractConversation(prefs.citationStyle);
         if (conversation.length === 0) {
           alert("No conversation content found to export.");
@@ -2169,12 +2397,6 @@
             alert("Failed to copy to clipboard. Please try again.");
           }
         } else {
-          const title = document.title.replace(" | Perplexity", "").trim();
-          const safeTitle = title
-            .toLowerCase()
-            .replace(/[^a-z0-9]+/g, " ")
-            .replace(/^-+|-+$/g, "");
-          const filename = `${safeTitle}.md`;
           downloadMarkdown(markdown, filename);
         }
       } catch (error) {
@@ -2230,10 +2452,22 @@
     document.body.appendChild(focusOverlay);
   }
 
+  // Check if the page has any exportable content (standard conversation or deep research)
+  function hasExportableContent() {
+    if (document.querySelector(".prose.text-pretty.dark\\:prose-invert") ||
+        document.querySelector("[class*='prose'][class*='prose-invert']") ||
+        document.querySelector("span[data-lexical-text='true']")) {
+      return true;
+    }
+    // Deep research: check for the report card or side panel
+    if (isDeepResearch()) return true;
+    return false;
+  }
+
   // Initialize the script
   function init() {
     const observer = new MutationObserver(() => {
-      if ((document.querySelector(".prose.text-pretty.dark\\:prose-invert") || document.querySelector("[class*='prose'][class*='prose-invert']") || document.querySelector("span[data-lexical-text='true']")) && !document.getElementById("perplexity-export-btn")) {
+      if (hasExportableContent() && !document.getElementById("perplexity-export-btn")) {
         addExportButton();
       }
     });
@@ -2243,7 +2477,7 @@
       subtree: true,
     });
 
-    if (document.querySelector(".prose.text-pretty.dark\\:prose-invert") || document.querySelector("[class*='prose'][class*='prose-invert']") || document.querySelector("span[data-lexical-text='true']")) {
+    if (hasExportableContent()) {
       addExportButton();
     }
   }
