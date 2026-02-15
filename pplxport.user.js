@@ -836,9 +836,9 @@
     const container = getThreadContainer();
 
     const assistantSelector = ".prose.text-pretty.dark\\:prose-invert, [class*='prose'][class*='prose-invert']";
-    const userSelectors = [".whitespace-pre-line.text-pretty.break-words", ".group\\/query span[data-lexical-text='true']", "h1.group\\/query span[data-lexical-text='true']", "span[data-lexical-text='true']"];
-    const combined = `${assistantSelector}, ${userSelectors.join(", ")}`;
-
+    const userSelector = "span.select-text";
+    const combined = `${assistantSelector}, ${userSelector}`;
+    
     const nodes = container.querySelectorAll(combined);
     nodes.forEach((node) => {
       if (node.matches(assistantSelector)) {
@@ -1172,14 +1172,20 @@
 
     // Method 1: Page-down with button clicking (most reliable)
     // Uses Perplexity's native copy buttons to extract exact content
-    console.log("Trying Method 1: Page-down with button clicking...");
-    const viaButtons = await extractByPageDownClickButtons(citationStyle);
-    console.log(`Method 1 found ${viaButtons.length} items`);
-    if (viaButtons.length >= 2) {
-      // At least 1 complete turn (User + Assistant)
-      console.log("✅ Using Method 1: Button clicking extraction");
-      return viaButtons;
-    }
+    
+    // DISABLING Method 1 currently due to: 
+    // 1. "Paste" tooltip popup blocking the export process on FF at least, 
+    // 2. Clipboard permission failures on FF at least (clipboard.readText()),
+    // 3. Perplexity's now more aggressive archiving of threads on refresh which removes buttons, and
+    // 4. Double scrolling when this method fails.  Tested 2-14-26
+    // console.log("Trying Method 1: Page-down with button clicking...");
+    // const viaButtons = await extractByPageDownClickButtons(citationStyle);
+    // console.log(`Method 1 found ${viaButtons.length} items`);
+    // if (viaButtons.length >= 2) {
+    //   // At least 1 complete turn (User + Assistant)
+    //   console.log("✅ Using Method 1: Button clicking extraction");
+    //   return viaButtons;
+    // }
 
     // Method 2: Single-pass DOM scan (no button clicking)
     // Directly reads DOM content while scrolling
