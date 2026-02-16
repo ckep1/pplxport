@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Perplexity.ai Chat Exporter
 // @namespace    https://github.com/ckep1/pplxport
-// @version      2.5.0
+// @version      2.6.0
 // @description  Export Perplexity.ai conversations as markdown with configurable citation styles
 // @author       Chris Kephart
 // @match        https://www.perplexity.ai/*
@@ -69,6 +69,12 @@
     [EXPORT_METHODS.CLIPBOARD]: "Copy to Clipboard",
   };
 
+  const EXTRACTION_METHODS = {
+    DIRECT_DOM: "direct_dom",
+    EXPORT: "export",
+    COPY_BUTTONS: "copy_buttons",
+  };
+
 
   // Global citation tracking for consistent numbering across all responses
   const globalCitations = {
@@ -111,10 +117,11 @@
     return {
       citationStyle: GM_getValue("citationStyle", CITATION_STYLES.PARENTHESIZED),
       formatStyle: GM_getValue("formatStyle", FORMAT_STYLES.FULL),
-      addExtraNewlines: GM_getValue("addExtraNewlines", false),
+      addExtraNewlines: GM_getValue("addExtraNewlines", true),
       exportMethod: GM_getValue("exportMethod", EXPORT_METHODS.DOWNLOAD),
       includeFrontmatter: GM_getValue("includeFrontmatter", true),
       titleAsH1: GM_getValue("titleAsH1", false),
+      extractionMethod: GM_getValue("extractionMethod", EXTRACTION_METHODS.DIRECT_DOM),
     };
   }
 
@@ -125,15 +132,15 @@
     // Clean the text
     text = text.trim();
 
-    // If it's a pattern like "rabbit+2", "reddit+1", extract the source name
-    const plusMatch = text.match(/^([a-zA-Z]+)\+\d+$/);
+    // If it's a pattern like "rabbit+2", "developer.mozilla+1", extract the source name
+    const plusMatch = text.match(/^(.+?)\+\d+$/);
     if (plusMatch) {
-      return plusMatch[1];
+      return plusMatch[1].toLowerCase();
     }
 
-    // If it's just text without numbers, use it as is (but clean it up)
-    const cleanName = text.replace(/[^a-zA-Z0-9-_]/g, "").toLowerCase();
-    if (cleanName && cleanName.length > 0) {
+    // If it's just text without numbers, use it as is (lowercased)
+    const cleanName = text.toLowerCase();
+    if (cleanName.length > 0) {
       return cleanName;
     }
 
@@ -241,7 +248,7 @@
     let node = el;
     let depth = 0;
     while (node && node !== document.body && depth < 10) {
-      if (node.querySelector && (node.querySelector("button[data-testid='copy-query-button']") || node.querySelector("button[aria-label='Copy Query']") || node.querySelector("span[data-lexical-text='true']"))) {
+      if (node.querySelector && (node.querySelector("button[data-testid='copy-query-button']") || node.querySelector("button[aria-label='Copy Query']") || node.querySelector("span[data-lexical-text='true']") || node.querySelector("span.select-text"))) {
         return node;
       }
       node = node.parentElement;
@@ -254,8 +261,7 @@
     let node = button;
     let depth = 0;
     while (node && node !== document.body && depth < 10) {
-      // A user message root should contain lexical text from the input/query
-      if (node.querySelector && (node.querySelector(".whitespace-pre-line.text-pretty.break-words") || node.querySelector("span[data-lexical-text='true']"))) {
+      if (node.querySelector && (node.querySelector(".whitespace-pre-line.text-pretty.break-words") || node.querySelector("span[data-lexical-text='true']") || node.querySelector("span.select-text"))) {
         return node;
       }
       node = node.parentElement;
@@ -289,37 +295,6 @@
     await new Promise((r) => setTimeout(r, delayMs));
   }
 
-  async function preloadPageFully() {
-    try {
-      const scroller = getScrollRoot();
-      window.focus();
-      scroller.scrollTop = 0;
-      await new Promise((resolve) => setTimeout(resolve, 80));
-
-      let lastHeight = scroller.scrollHeight;
-      let stableCount = 0;
-      const maxTries = 25; // shorter preload with faster intervals
-
-      for (let i = 0; i < maxTries && stableCount < 2; i++) {
-        scroller.scrollTop = scroller.scrollHeight;
-        await new Promise((resolve) => setTimeout(resolve, 120));
-        const newHeight = scroller.scrollHeight;
-        if (newHeight > lastHeight + 10) {
-          lastHeight = newHeight;
-          stableCount = 0;
-        } else {
-          stableCount++;
-        }
-      }
-      // Return to top so processing starts from the beginning
-      scroller.scrollTop = 0;
-      await new Promise((resolve) => setTimeout(resolve, 120));
-    } catch (e) {
-      // Non-fatal; we'll just proceed
-      console.warn("Preload scroll encountered an issue:", e);
-    }
-  }
-
   function simulateHover(element) {
     try {
       const rect = element.getBoundingClientRect();
@@ -339,7 +314,13 @@
 
     const startTime = Date.now();
     const overlay = document.getElementById('perplexity-focus-overlay');
-    if (overlay) overlay.style.display = 'flex';
+    if (overlay) {
+      const titleEl = overlay.querySelector("#perplexity-focus-overlay-title");
+      const subtitleEl = overlay.querySelector("#perplexity-focus-overlay-subtitle");
+      if (titleEl) titleEl.textContent = "Click here to continue export";
+      if (subtitleEl) subtitleEl.textContent = "Export paused - page needs focus to read clipboard";
+      overlay.style.display = 'flex';
+    }
 
     while (!document.hasFocus() && (Date.now() - startTime) < timeoutMs) {
       window.focus();
@@ -455,52 +436,6 @@
     }
   }
 
-  async function clickButtonAndGetClipboard(button) {
-    window.focus();
-    button.scrollIntoView({ behavior: "instant", block: "center", inline: "center" });
-    await new Promise((r) => setTimeout(r, 60));
-    simulateHover(button);
-    await new Promise((r) => setTimeout(r, 40));
-    button.focus();
-    button.click();
-    await new Promise((r) => setTimeout(r, 120));
-    window.focus();
-    return await readClipboardWithRetries(3, 60);
-  }
-
-  function collectAnchoredMessageRootsOnce() {
-    const roots = new Map(); // rootEl -> { rootEl, top, queryButton, responseButton }
-
-    const queryButtons = Array.from(document.querySelectorAll('button[data-testid="copy-query-button"], button[aria-label="Copy Query"]'));
-    for (const btn of queryButtons) {
-      if (isCodeCopyButton(btn)) continue;
-      const root = findUserMessageRootFrom(btn);
-      const top = root.getBoundingClientRect().top + window.scrollY || btn.getBoundingClientRect().top + window.scrollY;
-      const obj = roots.get(root) || { rootEl: root, top, queryButton: null, responseButton: null };
-      obj.queryButton = obj.queryButton || btn;
-      obj.top = Math.min(obj.top, top);
-      roots.set(root, obj);
-    }
-
-    const responseButtons = Array.from(document.querySelectorAll('button[aria-label="Copy"]')).filter((btn) => {
-      return btn.querySelector("svg.tabler-icon") || btn.querySelector("svg.tabler-icon-copy") || btn.querySelector("svg");
-    });
-    for (const btn of responseButtons) {
-      if (isCodeCopyButton(btn)) continue;
-      const root = findAssistantMessageRootFrom(btn);
-      // Ensure the root actually holds an assistant answer, not some header copy control
-      const hasAnswer = !!root.querySelector(".prose.text-pretty.dark\\:prose-invert, [class*='prose'][class*='prose-invert']");
-      if (!hasAnswer) continue;
-      const top = root.getBoundingClientRect().top + window.scrollY || btn.getBoundingClientRect().top + window.scrollY;
-      const obj = roots.get(root) || { rootEl: root, top, queryButton: null, responseButton: null };
-      obj.responseButton = obj.responseButton || btn;
-      obj.top = Math.min(obj.top, top);
-      roots.set(root, obj);
-    }
-
-    return Array.from(roots.values()).sort((a, b) => a.top - b.top);
-  }
-
   // ============================================================================
   // DEEP RESEARCH DETECTION & HELPERS
   // ============================================================================
@@ -524,52 +459,337 @@
   }
 
   async function interceptExportMarkdown() {
-    const origAnchorClick = HTMLAnchorElement.prototype.click;
-    let capturedText = null;
+    // Inject into page context (same sandbox issue as interceptThreadExportMarkdown)
+    const commId = '__pplxport_dr_capture_' + Date.now();
+    const comm = document.createElement('div');
+    comm.id = commId;
+    comm.style.display = 'none';
+    document.body.appendChild(comm);
 
-    // Intercept anchor clicks to capture the data URL content and block the download
-    HTMLAnchorElement.prototype.click = function() {
-      if (this.download && this.href?.startsWith('data:')) {
-        try {
-          const encoded = this.href.split(',')[1];
-          const prefix = this.href.split(',')[0];
-          if (prefix.includes('base64')) {
-            const bytes = Uint8Array.from(atob(encoded), c => c.charCodeAt(0));
-            capturedText = new TextDecoder().decode(bytes);
-          } else {
-            capturedText = decodeURIComponent(encoded);
+    const script = document.createElement('script');
+    script.textContent = `(function(){
+      var c=document.getElementById("${commId}");
+      var oc=HTMLAnchorElement.prototype.click;
+      var ou=URL.createObjectURL;
+      URL.createObjectURL=function(o){
+        var u=ou.call(this,o);
+        if(o instanceof Blob){o.text().then(function(t){c.textContent=t;});}
+        return u;
+      };
+      HTMLAnchorElement.prototype.click=function(){
+        if(this.download&&(this.href||"").match(/^(blob|data):/)){
+          if(this.href.startsWith("data:")){
+            try{
+              var p=this.href.split(",");var e=p[1];
+              if(p[0].indexOf("base64")>-1){
+                var b=Uint8Array.from(atob(e),function(x){return x.charCodeAt(0);});
+                c.textContent=new TextDecoder().decode(b);
+              }else{c.textContent=decodeURIComponent(e);}
+            }catch(x){}
           }
-        } catch {}
-        return;
-      }
-      return origAnchorClick.call(this);
-    };
+          return;
+        }
+        return oc.call(this);
+      };
+      window.__pplxport_dr_cleanup=function(){
+        HTMLAnchorElement.prototype.click=oc;
+        URL.createObjectURL=ou;
+        delete window.__pplxport_dr_cleanup;
+      };
+    })();`;
+    document.documentElement.appendChild(script);
+    script.remove();
 
     try {
-      // Open the Export dropdown (Radix needs focus + keyboard Enter)
       const exportBtn = Array.from(document.querySelectorAll('button[aria-haspopup="menu"]'))
         .find(b => b.textContent.includes('Export'));
       if (!exportBtn) throw new Error('Export button not found in side panel');
       exportBtn.focus();
-      exportBtn.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true }));
-      exportBtn.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', bubbles: true }));
+      simulateClick(exportBtn);
       await new Promise(r => setTimeout(r, 500));
 
-      // Click "Download as Markdown" menu item
       const menuItem = Array.from(document.querySelectorAll('[role="menuitem"]'))
         .find(m => m.textContent.includes('Download as Markdown'));
       if (!menuItem) throw new Error('Download as Markdown menu item not found');
-      menuItem.click();
+      simulateClick(menuItem);
+
+      for (let i = 0; i < 30; i++) {
+        await new Promise(r => setTimeout(r, 100));
+        if (comm.textContent) break;
+      }
+
+      return comm.textContent || null;
+    } finally {
+      const cleanup = document.createElement('script');
+      cleanup.textContent = 'if(window.__pplxport_dr_cleanup)window.__pplxport_dr_cleanup();';
+      document.documentElement.appendChild(cleanup);
+      cleanup.remove();
+      comm.remove();
+    }
+  }
+
+  // ============================================================================
+  // THREAD EXPORT INTERCEPTION (regular threads, NOT deep research)
+  // ============================================================================
+  // Fallback extraction method: triggers the three-dot menu's "Export as Markdown"
+  // on regular threads, intercepts the download, and reformats the content.
+  // Used automatically as a middle fallback between DOM scan and copy buttons.
+
+  function simulateClick(el) {
+    for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
+      el.dispatchEvent(new PointerEvent(type, { bubbles: true, cancelable: true, composed: true }));
+    }
+  }
+
+  async function interceptThreadExportMarkdown() {
+    // Inject interception into the PAGE context (not userscript sandbox).
+    // Tampermonkey's @grant sandbox isolates prototype patches, so we inject
+    // a <script> tag that patches in the page's own JS world.
+    const commId = '__pplxport_capture_' + Date.now();
+    const comm = document.createElement('div');
+    comm.id = commId;
+    comm.style.display = 'none';
+    document.body.appendChild(comm);
+
+    const script = document.createElement('script');
+    script.textContent = `(function(){
+      var c=document.getElementById("${commId}");
+      var oc=HTMLAnchorElement.prototype.click;
+      var ou=URL.createObjectURL;
+      URL.createObjectURL=function(o){
+        var u=ou.call(this,o);
+        if(o instanceof Blob){o.text().then(function(t){c.textContent=t;});}
+        return u;
+      };
+      HTMLAnchorElement.prototype.click=function(){
+        if(this.download&&(this.href||"").match(/^(blob|data):/)){
+          if(this.href.startsWith("data:")){
+            try{
+              var p=this.href.split(",");var e=p[1];
+              if(p[0].indexOf("base64")>-1){
+                var b=Uint8Array.from(atob(e),function(x){return x.charCodeAt(0);});
+                c.textContent=new TextDecoder().decode(b);
+              }else{c.textContent=decodeURIComponent(e);}
+            }catch(x){}
+          }
+          return;
+        }
+        return oc.call(this);
+      };
+      window.__pplxport_cleanup=function(){
+        HTMLAnchorElement.prototype.click=oc;
+        URL.createObjectURL=ou;
+        delete window.__pplxport_cleanup;
+      };
+    })();`;
+    document.documentElement.appendChild(script);
+    script.remove();
+
+    try {
+      // Find the "Thread actions" three-dot menu button
+      let threeDotBtn = document.querySelector('button[aria-label="Thread actions"]');
+      if (!threeDotBtn) {
+        const menuButtons = Array.from(document.querySelectorAll('button[aria-haspopup="menu"]'));
+        threeDotBtn = menuButtons.find(b => {
+          if (b.textContent.includes('Export')) return false;
+          if (!b.querySelector('svg')) return false;
+          if (b.closest('#perplexity-export-controls')) return false;
+          return true;
+        });
+      }
+
+      if (!threeDotBtn) throw new Error('Thread actions menu button not found');
+
+      threeDotBtn.focus();
+      simulateClick(threeDotBtn);
+      await new Promise(r => setTimeout(r, 500));
+
+      let menuItem = Array.from(document.querySelectorAll('[role="menuitem"]'))
+        .find(m => /export\s*(as\s*)?markdown/i.test(m.textContent));
+
+      if (!menuItem) {
+        menuItem = Array.from(document.querySelectorAll('[role="menuitem"]'))
+          .find(m => /^export$/i.test(m.textContent.trim()));
+      }
+
+      if (!menuItem) {
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+        throw new Error('Export as Markdown menu item not found');
+      }
+
+      simulateClick(menuItem);
+      await new Promise(r => setTimeout(r, 300));
+
+      // If clicking "Export" opened a sub-menu, look for "Markdown" item
+      if (!comm.textContent) {
+        const mdItem = Array.from(document.querySelectorAll('[role="menuitem"]'))
+          .find(m => /markdown/i.test(m.textContent) && !/export\s+as/i.test(m.textContent));
+        if (mdItem) {
+          simulateClick(mdItem);
+          await new Promise(r => setTimeout(r, 300));
+        }
+      }
 
       // Wait for capture
       for (let i = 0; i < 30; i++) {
         await new Promise(r => setTimeout(r, 100));
-        if (capturedText) break;
+        if (comm.textContent) break;
       }
 
-      return capturedText;
+      return comm.textContent || null;
     } finally {
-      HTMLAnchorElement.prototype.click = origAnchorClick;
+      // Restore originals in page context
+      const cleanup = document.createElement('script');
+      cleanup.textContent = 'if(window.__pplxport_cleanup)window.__pplxport_cleanup();';
+      document.documentElement.appendChild(cleanup);
+      cleanup.remove();
+      comm.remove();
+    }
+  }
+
+  function reformatThreadExportMarkdown(rawMd, citationStyle) {
+    // Normalize line endings (blobs may use CRLF)
+    let cleaned = rawMd.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+
+    // Remove the Perplexity logo <img> tag and any other HTML img tags
+    cleaned = cleaned.replace(/<img[^>]*>/gi, '');
+
+    // Remove <span style="display:none">...</span> blocks (hidden unused citations)
+    cleaned = cleaned.replace(/<span\s+style\s*=\s*"display:\s*none"[^>]*>[\s\S]*?<\/span>/gi, '');
+
+    // Remove <div align="center">...</div> dividers (the ⁂ separators)
+    cleaned = cleaned.replace(/<div\s+align\s*=\s*"center"[^>]*>[\s\S]*?<\/div>/gi, '');
+
+    // Remove any remaining HTML tags
+    cleaned = cleaned.replace(/<[^>]+>/g, '');
+
+    // Split into Q&A sections by --- horizontal rules
+    const sections = cleaned.split(/\n---\n/).map(s => s.trim()).filter(s => s.length > 0);
+
+    const conversation = [];
+
+    for (const section of sections) {
+      // Each section starts with # question heading, followed by answer body,
+      // then footnotes like [^N_M]: url at the bottom
+
+      const lines = section.split('\n');
+      let questionText = '';
+      const answerLines = [];
+      const footnoteMap = new Map(); // "N_M" -> url
+
+      let inFootnotes = false;
+
+      for (const line of lines) {
+        // Check for question heading
+        const questionMatch = line.match(/^# (.+)$/);
+        if (questionMatch && !questionText) {
+          questionText = questionMatch[1].trim();
+          continue;
+        }
+
+        // Check for per-answer footnote definitions: [^N_M]: url
+        const footnoteMatch = line.match(/^\[\^(\d+_\d+)\]:\s*(.+)$/);
+        if (footnoteMatch) {
+          inFootnotes = true;
+          footnoteMap.set(footnoteMatch[1], footnoteMatch[2].trim());
+          continue;
+        }
+
+        // Skip blank lines that appear between footnotes
+        if (inFootnotes && line.trim() === '') continue;
+
+        // If we were in footnotes but hit a non-footnote non-blank line,
+        // we're back in content (shouldn't normally happen)
+        if (inFootnotes && line.trim() !== '') {
+          inFootnotes = false;
+        }
+
+        // Accumulate answer body lines
+        if (questionText) {
+          answerLines.push(line);
+        }
+      }
+
+      if (!questionText) continue;
+
+      // Join answer lines and clean up
+      let answerBody = answerLines.join('\n').trim();
+
+      // Normalize horizontal rules within answers to ***
+      answerBody = answerBody.replace(/^---$/gm, '***');
+
+      // Collect which footnote keys are actually referenced in the visible answer body
+      const referencedKeys = new Set();
+      for (const m of answerBody.matchAll(/\[\^(\d+_\d+)\]/g)) {
+        referencedKeys.add(m[1]);
+      }
+
+      // Register only referenced footnotes with globalCitations
+      const localToGlobalMap = new Map();
+      for (const [localKey, url] of footnoteMap) {
+        if (!referencedKeys.has(localKey)) continue;
+        const globalNum = globalCitations.addCitation(url);
+        localToGlobalMap.set(localKey, globalNum);
+      }
+
+      // Replace scoped [^N_M] citations in the answer body according to citationStyle
+      if (citationStyle === CITATION_STYLES.NONE) {
+        answerBody = answerBody.replace(/\[\^\d+_\d+\]/g, '');
+      } else {
+        // Replace runs of consecutive citations like [^1_1][^1_2][^1_3]
+        answerBody = answerBody.replace(/(?:\[\^\d+_\d+\])+/g, (run) => {
+          const keys = Array.from(run.matchAll(/\[\^(\d+_\d+)\]/g)).map(m => m[1]);
+          if (keys.length === 0) return run;
+
+          return keys.map(localKey => {
+            const globalNum = localToGlobalMap.get(localKey) || localKey;
+            const url = footnoteMap.get(localKey) || '';
+
+            switch (citationStyle) {
+              case CITATION_STYLES.ENDNOTES:
+                return `[${globalNum}]`;
+              case CITATION_STYLES.FOOTNOTES:
+                return `[^${globalNum}]`;
+              case CITATION_STYLES.INLINE:
+                return url ? `[${globalNum}](${url})` : `[${globalNum}]`;
+              case CITATION_STYLES.PARENTHESIZED:
+                return url ? `([${globalNum}](${url}))` : `([${globalNum}])`;
+              case CITATION_STYLES.NAMED: {
+                const domain = extractDomainName(url) || 'source';
+                return url ? `([${domain}](${url}))` : `([${domain}])`;
+              }
+              default:
+                return `[^${globalNum}]`;
+            }
+          }).join('');
+        });
+      }
+
+      // Clean up excessive whitespace
+      answerBody = answerBody.replace(/\n{3,}/g, '\n\n').trim();
+
+      // Add to conversation
+      conversation.push({ role: 'User', content: questionText });
+      conversation.push({ role: 'Assistant', content: answerBody });
+    }
+
+    return conversation;
+  }
+
+  async function extractByThreadExport(citationStyle) {
+    try {
+      const rawMd = await interceptThreadExportMarkdown();
+      if (!rawMd) {
+        console.log('Thread export: failed to capture markdown');
+        return [];
+      }
+      console.log('Thread export: captured raw markdown, reformatting...');
+      const conversation = reformatThreadExportMarkdown(rawMd, citationStyle);
+      console.log(`Thread export: produced ${conversation.length} items`);
+      return conversation;
+    } catch (e) {
+      console.warn('Thread export failed:', e);
+      return [];
     }
   }
 
@@ -830,20 +1050,82 @@
     return collected;
   }
 
+  // Annotate each citation element on a live DOM node with data-urls
+  // so the URLs survive cloneNode (which strips React fiber refs)
+  function annotateCitationUrls(rootEl) {
+    const citations = rootEl.querySelectorAll('.citation:not(.citation-nbsp)');
+    if (citations.length === 0) return;
+    const fiberKey = Object.keys(citations[0]).find(k => k.startsWith('__reactFiber'));
+    if (!fiberKey) return;
+
+    let answerWebResults = null;
+
+    for (const citEl of citations) {
+      let fiber = citEl[fiberKey];
+      let citationIndices = null;
+
+      for (let i = 0; i < 35 && fiber; i++) {
+        const p = fiber.memoizedProps;
+        if (p?.citationGroup) {
+          if (p.webResults) {
+            const urls = p.webResults.map(wr => wr.url).filter(Boolean);
+            if (urls.length > 0) {
+              citEl.setAttribute('data-urls', urls.join('|'));
+            }
+            break;
+          }
+          if (Array.isArray(p.citationGroup.citations) && p.citationGroup.citations.every(c => typeof c === 'number')) {
+            citationIndices = p.citationGroup.citations;
+          } else {
+            break;
+          }
+        }
+
+        if (citationIndices && p?.webResults && Array.isArray(p.webResults) && p.webResults.length >= 5) {
+          answerWebResults = p.webResults;
+          const urls = citationIndices
+            .map(idx => answerWebResults[idx - 1]?.url)
+            .filter(Boolean);
+          if (urls.length > 0) {
+            citEl.setAttribute('data-urls', urls.join('|'));
+          }
+          break;
+        }
+
+        if (p?.href && !citEl.getAttribute('data-urls')) {
+          citEl.setAttribute('data-urls', p.href);
+        }
+        fiber = fiber.return;
+      }
+
+      if (citationIndices && !citEl.getAttribute('data-urls') && answerWebResults) {
+        const urls = citationIndices
+          .map(idx => answerWebResults[idx - 1]?.url)
+          .filter(Boolean);
+        if (urls.length > 0) {
+          citEl.setAttribute('data-urls', urls.join('|'));
+        }
+      }
+    }
+  }
+
   // Helper for Method 2: collect messages in DOM order within a pass
   function collectDomMessagesInOrderOnce(citationStyle, processedContent) {
     const results = [];
     const container = getThreadContainer();
 
     const assistantSelector = ".prose.text-pretty.dark\\:prose-invert, [class*='prose'][class*='prose-invert']";
-    const userSelectors = [".whitespace-pre-line.text-pretty.break-words", ".group\\/query span[data-lexical-text='true']", "h1.group\\/query span[data-lexical-text='true']", "span[data-lexical-text='true']"];
+    const userSelectors = ["h1[class*='group\\/query'] span.select-text", "span.select-text", ".whitespace-pre-line.text-pretty.break-words", ".group\\/query span[data-lexical-text='true']", "h1.group\\/query span[data-lexical-text='true']", "span[data-lexical-text='true']"];
     const combined = `${assistantSelector}, ${userSelectors.join(", ")}`;
 
     const nodes = container.querySelectorAll(combined);
     nodes.forEach((node) => {
       if (node.matches(assistantSelector)) {
+        // Annotate live citation elements with their URLs before cloning
+        // (cloning strips React fiber refs, but data attributes survive)
+        annotateCitationUrls(node);
         const cloned = node.cloneNode(true);
-        const md = htmlToMarkdown(cloned.innerHTML, citationStyle).trim();
+        const md = htmlToMarkdown(cloned.innerHTML, citationStyle, null).trim();
         if (!md) return;
         const hash = md.substring(0, 200) + md.substring(Math.max(0, md.length - 50)) + md.length;
         if (processedContent.has(hash)) return;
@@ -853,14 +1135,16 @@
         // User
         const root = findUserMessageRootFromElement(node);
         if (root.closest && (root.closest(".prose.text-pretty.dark\\:prose-invert") || root.closest("[class*='prose'][class*='prose-invert']"))) return;
-        // Aggregate query text from all lexical spans within the same root for stability
         const spans = root.querySelectorAll("span[data-lexical-text='true']");
+        const selectTextSpan = root.querySelector("span.select-text");
         let text = "";
         if (spans.length > 0) {
           text = Array.from(spans)
             .map((s) => (s.textContent || "").trim())
             .join(" ")
             .trim();
+        } else if (selectTextSpan) {
+          text = (selectTextSpan.textContent || "").trim();
         } else {
           text = (node.textContent || "").trim();
         }
@@ -878,332 +1162,68 @@
     return results;
   }
 
-  // Method 3: Anchored copy button approach (more complex, uses scrollIntoView)
-  async function extractUsingCopyButtons(citationStyle) {
-    // Reset global citation tracking for this export
+  // MAIN EXTRACTION ORCHESTRATOR
+  // Fallback chain based on user preference:
+  //   DIRECT_DOM: DOM scan -> export -> copy buttons
+  //   EXPORT:     export -> DOM scan -> copy buttons
+  //   COPY_BUTTONS: copy buttons -> export -> DOM scan
+  async function extractConversation(citationStyle) {
     globalCitations.reset();
+    const prefs = getPreferences();
 
-    try {
-      // First try anchored, container-aware approach with preload + progressive scroll
-      const anchored = await processAnchoredButtonsWithProgressiveScroll(citationStyle);
-      if (anchored.length > 0) {
-        return anchored;
-      }
+    if (prefs.extractionMethod === EXTRACTION_METHODS.DIRECT_DOM) {
+      console.log("Using Direct DOM extraction (user preference)...");
+      const domSingle = await extractByDomScanSinglePass(citationStyle);
+      console.log(`Direct DOM found ${domSingle.length} items`);
+      if (domSingle.length >= 2) return domSingle;
 
-      // Fallback: robust scroll-and-process (legacy)
-      return await scrollAndProcessButtons(citationStyle);
-    } catch (e) {
-      console.error("Copy button extraction failed:", e);
+      console.log("Direct DOM insufficient, trying export...");
+      globalCitations.reset();
+      const viaExport = await extractByThreadExport(citationStyle);
+      if (viaExport.length >= 2) return viaExport;
+
+      console.log("Export insufficient, trying copy buttons...");
+      globalCitations.reset();
+      const viaButtons = await extractByPageDownClickButtons(citationStyle);
+      if (viaButtons.length >= 2) return viaButtons;
+
       return [];
     }
-  }
 
-  async function processAnchoredButtonsWithProgressiveScroll(citationStyle) {
-    const conversation = [];
-    const processedContent = new Set();
-    const processedButtons = new WeakSet();
+    if (prefs.extractionMethod === EXTRACTION_METHODS.EXPORT) {
+      console.log("Using Export extraction (user preference)...");
+      const viaExport = await extractByThreadExport(citationStyle);
+      console.log(`Export found ${viaExport.length} items`);
+      if (viaExport.length >= 2) return viaExport;
 
-    await preloadPageFully();
+      console.log("Export insufficient, trying Direct DOM...");
+      globalCitations.reset();
+      const domSingle = await extractByDomScanSinglePass(citationStyle);
+      if (domSingle.length >= 2) return domSingle;
 
-    // Start at top and progressively page down to handle virtualized lists
-    const scroller = getScrollRoot();
-    scroller.scrollTop = 0;
-    await new Promise((r) => setTimeout(r, 80));
+      console.log("Direct DOM insufficient, trying copy buttons...");
+      globalCitations.reset();
+      const viaButtons = await extractByPageDownClickButtons(citationStyle);
+      if (viaButtons.length >= 2) return viaButtons;
 
-    let stableCount = 0;
-    let scrollAttempt = 0;
-    const maxScrollAttempts = 80;
-    const scrollDelay = 120;
-
-    while (scrollAttempt < maxScrollAttempts && stableCount < 5) {
-      scrollAttempt++;
-
-      const roots = collectAnchoredMessageRootsOnce();
-      let processedSomethingThisPass = false;
-
-      for (const item of roots) {
-        const { queryButton, responseButton } = item;
-
-        // Process query first
-        if (queryButton && !processedButtons.has(queryButton)) {
-          try {
-            const text = (await clickButtonAndGetClipboard(queryButton))?.trim();
-            if (text) {
-              const contentHash = text.substring(0, 200) + text.substring(Math.max(0, text.length - 50)) + text.length;
-              if (!processedContent.has(contentHash)) {
-                processedContent.add(contentHash);
-                conversation.push({ role: "User", content: text });
-                processedSomethingThisPass = true;
-              }
-            }
-          } catch (e) {
-            console.warn("Query copy failed:", e);
-          } finally {
-            processedButtons.add(queryButton);
-          }
-        }
-
-        // Then process response
-        if (responseButton && !processedButtons.has(responseButton)) {
-          try {
-            const raw = (await clickButtonAndGetClipboard(responseButton))?.trim();
-            if (raw) {
-              const contentHash = raw.substring(0, 200) + raw.substring(Math.max(0, raw.length - 50)) + raw.length;
-              if (!processedContent.has(contentHash)) {
-                processedContent.add(contentHash);
-                const multiCitMap = extractMultiCitationMap(responseButton);
-                const processedMarkdown = processCopiedMarkdown(raw, citationStyle, multiCitMap);
-                conversation.push({ role: "Assistant", content: processedMarkdown });
-                processedSomethingThisPass = true;
-              }
-            }
-          } catch (e) {
-            console.warn("Response copy failed:", e);
-          } finally {
-            processedButtons.add(responseButton);
-          }
-        }
-      }
-
-      if (!processedSomethingThisPass) {
-        stableCount++;
-      } else {
-        stableCount = 0;
-      }
-
-      // Page down and allow DOM to settle
-      await pageDownOnce(scroller, scrollDelay, 0.9);
+      return [];
     }
 
-    // Try to catch any remaining at the end with a final full scan without scrolling
-    const finalRoots = collectAnchoredMessageRootsOnce();
-    for (const { queryButton, responseButton } of finalRoots) {
-      if (queryButton && !processedButtons.has(queryButton)) {
-        try {
-          const text = (await clickButtonAndGetClipboard(queryButton))?.trim();
-          if (text) {
-            const contentHash = text.substring(0, 200) + text.substring(Math.max(0, text.length - 50)) + text.length;
-            if (!processedContent.has(contentHash)) {
-              processedContent.add(contentHash);
-              conversation.push({ role: "User", content: text });
-            }
-          }
-        } catch {}
-      }
-      if (responseButton && !processedButtons.has(responseButton)) {
-        try {
-          const raw = (await clickButtonAndGetClipboard(responseButton))?.trim();
-          if (raw) {
-            const contentHash = raw.substring(0, 200) + raw.substring(Math.max(0, raw.length - 50)) + raw.length;
-            if (!processedContent.has(contentHash)) {
-              processedContent.add(contentHash);
-              const multiCitMap = extractMultiCitationMap(responseButton);
-              const processedMarkdown = processCopiedMarkdown(raw, citationStyle, multiCitMap);
-              conversation.push({ role: "Assistant", content: processedMarkdown });
-            }
-          }
-        } catch {}
-      }
-    }
-
-    // Return to top
-    scroller.scrollTop = 0;
-    await new Promise((r) => setTimeout(r, 300));
-
-    return conversation;
-  }
-
-  // Robustly scroll through page and process copy buttons as we find them
-  async function scrollAndProcessButtons(citationStyle) {
-    console.log("Starting robust scroll and process...");
-
-    const conversation = [];
-    const processedContent = new Set();
-    const processedButtons = new Set();
-
-    // Ensure document stays focused
-    window.focus();
-
-      // Start from top
-  const scroller = getScrollRoot();
-  scroller.scrollTop = 0;
-  await new Promise((resolve) => setTimeout(resolve, 120));
-
-    let stableCount = 0;
-    let scrollAttempt = 0;
-    let lastButtonCount = 0;
-    const maxScrollAttempts = 80; // faster loop
-    const scrollDelay = 120; // shorter delay between page downs
-
-    while (scrollAttempt < maxScrollAttempts && stableCount < 5) {
-      scrollAttempt++;
-
-      // Count current buttons before processing
-      const currentButtonCount = document.querySelectorAll('button[data-testid="copy-query-button"], button[aria-label="Copy Query"], button[aria-label="Copy"]').length;
-
-      console.log(`Page Down attempt ${scrollAttempt}: buttons=${currentButtonCount}`);
-
-      // Find and process visible copy buttons at current position
-      await processVisibleButtons();
-
-      // Track button count changes
-      if (currentButtonCount > lastButtonCount) {
-        console.log(`Button count increased from ${lastButtonCount} to ${currentButtonCount}`);
-        lastButtonCount = currentButtonCount;
-        stableCount = 0; // Reset stability when new buttons found
-      } else {
-        stableCount++;
-        console.log(`Button count stable at ${currentButtonCount} (stability: ${stableCount}/5)`);
-      }
-
-      // Page down the actual scroller
-      await pageDownOnce(scroller, scrollDelay, 0.9);
-    }
-
-    console.log(`Scroll complete after ${scrollAttempt} attempts. Found ${conversation.length} conversation items`);
-
-      // Return to top
-  scroller.scrollTop = 0;
-  await new Promise((resolve) => setTimeout(resolve, 120));
-
-    return conversation;
-
-    // Helper function to process visible buttons at current scroll position
-    async function processVisibleButtons() {
-      const allButtons = document.querySelectorAll("button");
-      const copyButtons = [];
-
-      allButtons.forEach((btn) => {
-        if (processedButtons.has(btn)) return;
-
-        // Exclude code block copy buttons
-        const testId = btn.getAttribute("data-testid");
-        const ariaLower = (btn.getAttribute("aria-label") || "").toLowerCase();
-        if (testId === "copy-code-button" || testId === "copy-code" || testId?.includes("copy-code") || ariaLower.includes("copy code") || btn.closest("pre") || btn.closest("code")) {
-          return;
-        }
-
-        // Only include conversation copy buttons
-        const isQueryCopyButton = testId === "copy-query-button" || btn.getAttribute("aria-label") === "Copy Query";
-        const isResponseCopyButton = btn.getAttribute("aria-label") === "Copy" && (btn.querySelector("svg.tabler-icon") || btn.querySelector("svg.tabler-icon-copy") || btn.querySelector("svg"));
-
-        if (isQueryCopyButton) {
-          copyButtons.push({ el: btn, role: "User" });
-        } else if (isResponseCopyButton) {
-          copyButtons.push({ el: btn, role: "Assistant" });
-        }
-      });
-
-      // Sort by vertical position
-      copyButtons.sort((a, b) => {
-        const aTop = a.el.getBoundingClientRect().top + window.scrollY;
-        const bTop = b.el.getBoundingClientRect().top + window.scrollY;
-        return aTop - bTop;
-      });
-
-      console.log(`Found ${copyButtons.length} copy buttons in DOM`);
-
-      // Process each copy button (don't filter by viewport visibility)
-      for (const { el: button, role } of copyButtons) {
-        if (processedButtons.has(button)) continue;
-
-        try {
-          processedButtons.add(button);
-
-          // Ensure window stays focused
-          window.focus();
-
-          // Scroll button into view and center it
-          button.scrollIntoView({
-            behavior: "instant",
-            block: "center",
-            inline: "center",
-          });
-          await new Promise((resolve) => setTimeout(resolve, 80));
-
-          // Click button
-          button.focus();
-          button.click();
-
-          // Wait for clipboard
-          await new Promise((resolve) => setTimeout(resolve, 120));
-          window.focus();
-
-          const clipboardText = await navigator.clipboard.readText();
-
-          if (clipboardText && clipboardText.trim().length > 0) {
-            // Check for duplicates
-            const trimmedContent = clipboardText.trim();
-            const contentHash = trimmedContent.substring(0, 200) + trimmedContent.substring(Math.max(0, trimmedContent.length - 50)) + trimmedContent.length;
-
-            if (processedContent.has(contentHash)) {
-              console.log(`Skipping duplicate content (${clipboardText.length} chars)`);
-              continue;
-            }
-
-            processedContent.add(contentHash);
-
-            if (role === "User") {
-              conversation.push({
-                role: "User",
-                content: trimmedContent,
-              });
-            } else {
-              const multiCitMap = extractMultiCitationMap(button);
-              const processedMarkdown = processCopiedMarkdown(clipboardText, citationStyle, multiCitMap);
-              conversation.push({
-                role: "Assistant",
-                content: processedMarkdown,
-              });
-            }
-          }
-        } catch (e) {
-          console.error(`Failed to copy from button:`, e);
-        }
-      }
-    }
-  }
-
-
-  // MAIN EXTRACTION ORCHESTRATOR
-  async function extractConversation(citationStyle) {
-    // Reset global citation tracking
-    globalCitations.reset();
-
-    // Method 1: Page-down with button clicking (most reliable)
-    // Uses Perplexity's native copy buttons to extract exact content
-    console.log("Trying Method 1: Page-down with button clicking...");
+    console.log("Using Copy Buttons extraction...");
     const viaButtons = await extractByPageDownClickButtons(citationStyle);
-    console.log(`Method 1 found ${viaButtons.length} items`);
-    if (viaButtons.length >= 2) {
-      // At least 1 complete turn (User + Assistant)
-      console.log("✅ Using Method 1: Button clicking extraction");
-      return viaButtons;
-    }
+    console.log(`Copy Buttons found ${viaButtons.length} items`);
+    if (viaButtons.length >= 2) return viaButtons;
 
-    // Method 2: Single-pass DOM scan (no button clicking)
-    // Directly reads DOM content while scrolling
-    console.log("Trying Method 2: Single-pass DOM scan...");
+    console.log("Copy Buttons insufficient, trying export...");
+    globalCitations.reset();
+    const viaExport = await extractByThreadExport(citationStyle);
+    if (viaExport.length >= 2) return viaExport;
+
+    console.log("Export insufficient, falling back to DOM scan...");
+    globalCitations.reset();
     const domSingle = await extractByDomScanSinglePass(citationStyle);
-    console.log(`Method 2 found ${domSingle.length} items`);
-    if (domSingle.length >= 2) {
-      // At least 1 complete turn (User + Assistant)
-      console.log("✅ Using Method 2: DOM scan extraction");
-      return domSingle;
-    }
+    if (domSingle.length >= 2) return domSingle;
 
-    // Method 3: Anchored copy button approach (legacy)
-    // Falls back to older button-based extraction
-    console.log("Trying Method 3: Anchored copy button approach...");
-    const copyButtonApproach = await extractUsingCopyButtons(citationStyle);
-    console.log(`Method 3 found ${copyButtonApproach.length} items`);
-    if (copyButtonApproach.length >= 2) {
-      // At least 1 complete turn (User + Assistant)
-      console.log("✅ Using Method 3: Anchored button extraction");
-      return copyButtonApproach;
-    }
-
-    console.log("❌ No content found with any method");
     return [];
   }
 
@@ -1211,38 +1231,72 @@
   // MARKDOWN PROCESSING FUNCTIONS
   // ============================================================================
 
-  function extractMultiCitationMap(responseButton) {
-    const responseRoot = findAssistantMessageRootFrom(responseButton);
-    if (!responseRoot) return null;
+  function extractMultiCitationMapFromRoot(rootEl) {
+    if (!rootEl) return null;
 
-    const citations = responseRoot.querySelectorAll('.citation');
+    const citations = rootEl.querySelectorAll('.citation');
     if (citations.length === 0) return null;
 
     const fiberKey = Object.keys(citations[0]).find(k => k.startsWith('__reactFiber'));
     if (!fiberKey) return null;
 
     const map = new Map();
+    let answerWebResults = null;
 
     for (const citEl of citations) {
       let node = citEl[fiberKey];
-      for (let i = 0; i < 25 && node; i++) {
+      let citationIndices = null;
+
+      for (let i = 0; i < 35 && node; i++) {
         const props = node.memoizedProps || node.pendingProps;
-        if (props?.citationGroup?.isGrouped && props?.webResults?.length > 1) {
-          const urls = props.webResults.map(wr => wr.url).filter(Boolean);
-          if (urls.length > 1) {
-            const primaryNorm = normalizeUrl(urls[0]);
-            if (!map.has(primaryNorm)) {
-              map.set(primaryNorm, urls);
+        if (props?.citationGroup) {
+          if (props.webResults?.length > 0) {
+            const urls = props.webResults.map(wr => wr.url).filter(Boolean);
+            if (urls.length > 0) {
+              const primaryNorm = normalizeUrl(urls[0]);
+              if (!map.has(primaryNorm)) map.set(primaryNorm, urls);
+              const fullText = (citEl.textContent || "").trim().toLowerCase();
+              if (fullText && !map.has(fullText)) map.set(fullText, urls);
             }
+            break;
+          }
+          if (Array.isArray(props.citationGroup.citations) && props.citationGroup.citations.every(c => typeof c === 'number')) {
+            citationIndices = props.citationGroup.citations;
+          } else {
+            break;
+          }
+        }
+
+        if (citationIndices && props?.webResults && Array.isArray(props.webResults) && props.webResults.length >= 5) {
+          answerWebResults = props.webResults;
+          const urls = citationIndices.map(idx => answerWebResults[idx - 1]?.url).filter(Boolean);
+          if (urls.length > 0) {
+            const fullText = (citEl.textContent || "").trim().toLowerCase();
+            if (fullText) map.set(fullText, urls);
+            const primaryNorm = normalizeUrl(urls[0]);
+            if (!map.has(primaryNorm)) map.set(primaryNorm, urls);
           }
           break;
         }
-        if (props?.citationGroup) break;
+
         node = node.return;
+      }
+
+      if (citationIndices && answerWebResults && !map.has((citEl.textContent || "").trim().toLowerCase())) {
+        const urls = citationIndices.map(idx => answerWebResults[idx - 1]?.url).filter(Boolean);
+        if (urls.length > 0) {
+          const fullText = (citEl.textContent || "").trim().toLowerCase();
+          if (fullText) map.set(fullText, urls);
+        }
       }
     }
 
     return map.size > 0 ? map : null;
+  }
+
+  function extractMultiCitationMap(responseButton) {
+    const responseRoot = findAssistantMessageRootFrom(responseButton);
+    return extractMultiCitationMapFromRoot(responseRoot);
   }
 
   // Process copied markdown and convert citations to desired style with global consolidation
@@ -1286,7 +1340,7 @@
     });
 
     // Normalize any inline [N](url) occurrences inside the content into [N] tokens, while capturing URLs
-    content = content.replace(/\[(\d+)\]\(([^)]+)\)/g, (m, localNum, url) => {
+    content = content.replace(/\[(\d+)\]\(([^)]+)\)/g, (_m, localNum, url) => {
       if (!localReferences.has(localNum)) {
         localReferences.set(localNum, url);
         if (!localToGlobalMap.has(localNum)) {
@@ -1364,9 +1418,33 @@
       return run;
     });
 
+    // Handle bare multi-citation text like "developer.mozilla+1" or "reddit+2" from newer clipboard
+    if (multiCitationMap) {
+      content = content.replace(/(?<=[.!?:,;)\]}\s]|^)([a-zA-Z][a-zA-Z0-9._-]*\+\d+)(?=[\s.,;:!?)}\]\n]|$)/gm, (match, citText) => {
+        const key = citText.trim().toLowerCase();
+        const mapUrls = multiCitationMap.get(key);
+        if (!mapUrls || mapUrls.length === 0) return match;
+
+        const globalNums = mapUrls.map(u => {
+          const gn = globalCitations.addCitation(u);
+          localReferences.set(String(gn), u);
+          localToGlobalMap.set(String(gn), gn);
+          return gn;
+        });
+        const localNums = globalNums.map(String);
+        if (citationStyle === CITATION_STYLES.NONE) return "";
+        if (citationStyle === CITATION_STYLES.ENDNOTES) return buildEndnotesRun(localNums);
+        if (citationStyle === CITATION_STYLES.FOOTNOTES) return buildFootnotesRun(localNums);
+        if (citationStyle === CITATION_STYLES.INLINE) return buildInlineRun(localNums);
+        if (citationStyle === CITATION_STYLES.PARENTHESIZED) return buildParenthesizedRun(localNums);
+        if (citationStyle === CITATION_STYLES.NAMED) return buildNamedRun(localNums);
+        return match;
+      });
+    }
+
     // Handle named citation links: [domain](url) format from newer Perplexity clipboard
     content = content.replace(/\[([^\]\n]{1,40})\]\((https?:\/\/[^)]+)\)/g, (match, text, url) => {
-      if (/^\d+$/.test(text) || /\s/.test(text)) return match;
+      if (/^\d+$/.test(text) || /\s/.test(text) || !/^[a-zA-Z][a-zA-Z0-9._-]*(?:\+\d+)?$/.test(text)) return match;
 
       const companionUrls = multiCitationMap?.get(normalizeUrl(url));
       if (companionUrls && companionUrls.length > 1) {
@@ -1403,23 +1481,116 @@
     // Handle newline spacing based on user preference
     const prefs = getPreferences();
     if (prefs.addExtraNewlines) {
-      // Keep some extra newlines (max two consecutive)
       content = content.replace(/\n{3,}/g, "\n\n");
     } else {
-      // Strip ALL extra newlines by default - single newlines only everywhere
+      // Compact: protect table blocks, then strip extra newlines
+      const tableHolder = [];
+      content = content.replace(/\n\n(\|[^\n]+\n\|[^\n]+\n(?:\|[^\n]+\n?)*)/g, (_m, table) => {
+        tableHolder.push(table);
+        return `\n\n%%TABLE_${tableHolder.length - 1}%%\n`;
+      });
       content = content
-        .replace(/\n+/g, "\n") // Replace any multiple newlines with single newline
-        .replace(/\n\s*\n/g, "\n"); // Remove any newlines with just whitespace between them
+        .replace(/\n+/g, "\n")
+        .replace(/\n\s*\n/g, "\n");
+      // Restore tables with required blank line before them
+      tableHolder.forEach((table, i) => {
+        content = content.replace(`%%TABLE_${i}%%`, `\n${table.trimEnd()}`);
+      });
     }
 
-    // Ensure content ends with single newline and clean up extra whitespace
     content = content.trim();
 
     return content;
   }
 
+  // Indent continuation lines inside list items
+  function indentListContinuations(text) {
+    const lines = text.split("\n");
+    const result = [];
+    const listStack = [];
+    let inCodeBlock = false;
+    let lastMeaningfulLineType = "other";
+    const nonContinuationLine = /^(?:\s*#{1,6}\s|\s*\||\s*%%PRESERVE|\s*%%TBL|\s*\*\*\*)/;
+
+    for (const line of lines) {
+      if (/^\s*```/.test(line)) {
+        inCodeBlock = !inCodeBlock;
+        result.push(line);
+        lastMeaningfulLineType = "continuation";
+        continue;
+      }
+
+      if (inCodeBlock) {
+        result.push(line);
+        continue;
+      }
+
+      if (line === "") {
+        result.push(line);
+        continue;
+      }
+
+      const listMatch = line.match(/^(\s*)([-*+]|\d+\.)\s+/);
+      if (listMatch) {
+        const sourceMarkerIndent = listMatch[1].length;
+        const marker = listMatch[2];
+        const sourceContentIndent = listMatch[0].length;
+        const content = line.slice(sourceContentIndent);
+        const markerWidth = sourceContentIndent - sourceMarkerIndent;
+
+        while (listStack.length && sourceMarkerIndent < listStack[listStack.length - 1].sourceMarkerIndent) {
+          listStack.pop();
+        }
+        if (listStack.length && sourceMarkerIndent === listStack[listStack.length - 1].sourceMarkerIndent) {
+          listStack.pop();
+        }
+
+        const depth = listStack.length;
+        const normalizedMarkerIndent = depth * 4;
+        const normalizedContentIndent = normalizedMarkerIndent + markerWidth;
+
+        listStack.push({
+          sourceMarkerIndent,
+          sourceContentIndent,
+          markerIndent: normalizedMarkerIndent,
+          contentIndent: normalizedContentIndent,
+        });
+
+        result.push(`${" ".repeat(normalizedMarkerIndent)}${marker} ${content}`);
+        lastMeaningfulLineType = "list";
+        continue;
+      }
+
+      if (listStack.length) {
+        const currentIndent = (line.match(/^\s*/) || [""])[0].length;
+
+        if (lastMeaningfulLineType !== "list") {
+          while (listStack.length && currentIndent < listStack[listStack.length - 1].sourceContentIndent) {
+            listStack.pop();
+          }
+          if (listStack.length && currentIndent < listStack[0].sourceContentIndent) {
+            listStack.length = 0;
+          }
+        }
+
+        if (listStack.length && !nonContinuationLine.test(line)) {
+          const targetIndent = listStack[listStack.length - 1].contentIndent;
+          result.push(currentIndent < targetIndent ? " ".repeat(targetIndent - currentIndent) + line : line);
+          lastMeaningfulLineType = "continuation";
+          continue;
+        }
+      }
+
+      listStack.length = 0;
+      result.push(line);
+      lastMeaningfulLineType = "other";
+    }
+
+    return result.join("\n");
+  }
+
   // Convert HTML content to markdown
-  function htmlToMarkdown(html, citationStyle = CITATION_STYLES.PARENTHESIZED) {
+  function htmlToMarkdown(html, citationStyle = CITATION_STYLES.PARENTHESIZED, multiCitationMap = null) {
     const tempDiv = document.createElement("div");
     tempDiv.innerHTML = html;
 
@@ -1449,73 +1620,69 @@
       ...tempDiv.querySelectorAll(".citation:not(a)"), // New structure (covers .citation.inline, .citation.inline-flex, etc.)
     ];
 
-    // Track unique sources by normalized URL
-    const urlToNumber = new Map(); // normalized URL -> citation number
-    const citationRefs = new Map(); // citation number -> {href, sourceName, normalizedUrl, multipleUrls}
-    let nextCitationNumber = 1;
+    // Use globalCitations for consistent numbering across the entire document
+    const urlToNumber = new Map(); // normalized URL -> global citation number
 
-    // Process citations synchronously first, then handle multi-citations
+    function registerUrl(url, sourceName) {
+      const norm = normalizeUrl(url);
+      if (!urlToNumber.has(norm)) {
+        const num = globalCitations.addCitation(url, sourceName);
+        urlToNumber.set(norm, num);
+      }
+      return urlToNumber.get(norm);
+    }
+
+    // First pass: register all citation URLs
     citations.forEach((citation) => {
       let href = null;
       let sourceName = null;
       let isMultiCitation = false;
 
-      // Handle old structure (a.citation)
       if (citation.tagName === "A" && citation.classList.contains("citation")) {
         href = citation.getAttribute("href");
-      }
-      // Handle new structure (span.citation with nested anchor)
-      else if (citation.classList.contains("citation") && citation.tagName !== "A") {
-        // Get source name from aria-label or nested text
+      } else if (citation.classList.contains("citation") && citation.tagName !== "A") {
         const ariaLabel = citation.getAttribute("aria-label");
         if (ariaLabel) {
           sourceName = extractSourceName(ariaLabel);
         }
 
-        // If no source name from aria-label, try to find it in nested elements
         if (!sourceName) {
           const numberSpan = citation.querySelector('.text-3xs, [class*="text-3xs"]');
           if (numberSpan) {
             const spanText = numberSpan.textContent;
             sourceName = extractSourceName(spanText);
-
-            // Check if this is a multi-citation (has +N format)
             isMultiCitation = /\+\d+$/.test(spanText.trim());
           }
         }
 
-        // If still no source name, try the citation's text content
         if (!sourceName) {
           const text = citation.textContent.trim();
           if (text) sourceName = extractSourceName(text);
         }
 
-        // Get href from nested anchor
         const nestedAnchor = citation.querySelector("a[href]");
         href = nestedAnchor ? nestedAnchor.getAttribute("href") : null;
 
-        // For multi-citations, we'll process them later to avoid blocking
         if (isMultiCitation) {
           citation.setAttribute("data-is-multi-citation", "true");
         }
       }
 
-      if (href) {
-        const normalizedUrl = normalizeUrl(href);
-
-        // Check if we've seen this URL before
-        if (!urlToNumber.has(normalizedUrl)) {
-          // New URL - assign next available number
-          urlToNumber.set(normalizedUrl, nextCitationNumber);
-          citationRefs.set(nextCitationNumber, {
-            href,
-            sourceName,
-            normalizedUrl,
-            isMultiCitation,
-          });
-          nextCitationNumber++;
+      // Prefer data-urls attribute (set by annotateCitationUrls on live DOM before cloning)
+      const dataUrls = citation.getAttribute('data-urls');
+      if (dataUrls) {
+        const urls = dataUrls.split('|').filter(Boolean);
+        for (const u of urls) registerUrl(u, sourceName);
+      } else if (href) {
+        registerUrl(href, sourceName);
+      } else if (isMultiCitation && multiCitationMap) {
+        const fullText = (citation.textContent || "").trim().toLowerCase();
+        const mapUrls = multiCitationMap.get(fullText) || (sourceName && multiCitationMap.get(sourceName));
+        if (mapUrls) {
+          for (const u of mapUrls) {
+            registerUrl(u, sourceName);
+          }
         }
-        // If we've seen this URL before, we'll reuse the existing number
       }
     });
 
@@ -1556,52 +1723,108 @@
         href = nestedAnchor ? nestedAnchor.getAttribute("href") : null;
       }
 
-      if (href) {
+      // Prefer data-urls attribute (set by annotateCitationUrls before cloning)
+      const elDataUrls = el.getAttribute('data-urls');
+      const resolvedUrls = elDataUrls ? elDataUrls.split('|').filter(Boolean) : null;
+
+      if (resolvedUrls && resolvedUrls.length > 0) {
+        const localNums = resolvedUrls.map(u => urlToNumber.get(normalizeUrl(u))).filter(Boolean);
+        if (localNums.length === 0) { el.replaceWith(""); return; }
+        let citationText = "";
+        if (citationStyle === CITATION_STYLES.NONE) {
+          citationText = "";
+        } else if (citationStyle === CITATION_STYLES.NAMED) {
+          citationText = localNums.map((_n, i) => {
+            const domain = extractDomainName(resolvedUrls[i]) || "source";
+            return `([${domain}](${resolvedUrls[i]}))`;
+          }).join(" ");
+          citationText = ` ${citationText} `;
+        } else if (citationStyle === CITATION_STYLES.INLINE) {
+          citationText = localNums.map((n, i) => `[${n}](${resolvedUrls[i]})`).join("");
+          citationText = ` ${citationText} `;
+        } else if (citationStyle === CITATION_STYLES.PARENTHESIZED) {
+          citationText = localNums.map((n, i) => `([${n}](${resolvedUrls[i]}))`).join(" ");
+          citationText = ` ${citationText} `;
+        } else if (citationStyle === CITATION_STYLES.FOOTNOTES) {
+          citationText = localNums.map(n => `[^${n}]`).join("");
+          citationText = ` ${citationText} `;
+        } else {
+          citationText = localNums.map(n => `[${n}]`).join("");
+          citationText = ` ${citationText} `;
+        }
+        el.replaceWith(citationText);
+      } else if (href) {
         const normalizedUrl = normalizeUrl(href);
         const number = urlToNumber.get(normalizedUrl);
 
         if (number) {
-          // For multi-citations, we'll show a note about multiple sources
           let citationText = "";
-          let citationUrl = href;
-
-          if (isMultiCitation) {
-            // Extract the count from the +N format
-            const numberSpan = el.querySelector('.text-3xs, [class*="text-3xs"]');
-            const countMatch = numberSpan ? numberSpan.textContent.match(/\+(\d+)$/) : null;
-            const count = countMatch ? parseInt(countMatch[1]) : 2;
-
-            if (citationStyle === CITATION_STYLES.NONE) {
-              citationText = ""; // Remove citation completely
-            } else if (citationStyle === CITATION_STYLES.NAMED && sourceName) {
-              citationText = ` ([${sourceName} +${count} more](${citationUrl})) `;
-            } else {
-              citationText = ` [${number} +${count} more](${citationUrl}) `;
-            }
+          if (citationStyle === CITATION_STYLES.NONE) {
+            citationText = "";
+          } else if (citationStyle === CITATION_STYLES.INLINE) {
+            citationText = ` [${number}](${href}) `;
+          } else if (citationStyle === CITATION_STYLES.PARENTHESIZED) {
+            citationText = ` ([${number}](${href})) `;
+          } else if (citationStyle === CITATION_STYLES.NAMED && sourceName) {
+            citationText = ` ([${sourceName}](${href})) `;
+          } else if (citationStyle === CITATION_STYLES.FOOTNOTES) {
+            citationText = ` [^${number}] `;
           } else {
-            // Single citation - use normal format
-            if (citationStyle === CITATION_STYLES.NONE) {
-              citationText = ""; // Remove citation completely
-            } else if (citationStyle === CITATION_STYLES.INLINE) {
-              citationText = ` [${number}](${citationUrl}) `;
-            } else if (citationStyle === CITATION_STYLES.PARENTHESIZED) {
-              citationText = ` ([${number}](${citationUrl})) `;
-            } else if (citationStyle === CITATION_STYLES.NAMED && sourceName) {
-              citationText = ` ([${sourceName}](${citationUrl})) `;
-            } else if (citationStyle === CITATION_STYLES.FOOTNOTES) {
-              citationText = ` [^${number}] `;
-            } else {
-              citationText = ` [${number}] `;
-            }
+            citationText = ` [${number}] `;
           }
-
           el.replaceWith(citationText);
-        } else {
-          // Fallback if we can't find the number
         }
-      } else {
-        // Fallback if we can't parse properly
+      } else if (isMultiCitation && multiCitationMap) {
+        const elFullText = (el.textContent || "").trim().toLowerCase();
+        const mapUrls = multiCitationMap.get(elFullText) || (sourceName && multiCitationMap.get(sourceName));
+        if (mapUrls && mapUrls.length > 0) {
+          const localNums = mapUrls.map(u => urlToNumber.get(normalizeUrl(u))).filter(Boolean);
+          if (localNums.length === 0) { el.replaceWith(""); return; }
+          let citationText = "";
+          if (citationStyle === CITATION_STYLES.NONE) {
+            citationText = "";
+          } else if (citationStyle === CITATION_STYLES.NAMED) {
+            citationText = localNums.map((_n, i) => {
+              const domain = extractDomainName(mapUrls[i]) || "source";
+              return `([${domain}](${mapUrls[i]}))`;
+            }).join(" ");
+            citationText = ` ${citationText} `;
+          } else if (citationStyle === CITATION_STYLES.INLINE) {
+            citationText = localNums.map((n, i) => `[${n}](${mapUrls[i]})`).join("");
+            citationText = ` ${citationText} `;
+          } else if (citationStyle === CITATION_STYLES.PARENTHESIZED) {
+            citationText = localNums.map((n, i) => `([${n}](${mapUrls[i]}))`).join(" ");
+            citationText = ` ${citationText} `;
+          } else if (citationStyle === CITATION_STYLES.FOOTNOTES) {
+            citationText = localNums.map(n => `[^${n}]`).join("");
+            citationText = ` ${citationText} `;
+          } else {
+            citationText = localNums.map(n => `[${n}]`).join("");
+            citationText = ` ${citationText} `;
+          }
+          el.replaceWith(citationText);
+        }
       }
+    });
+
+    tempDiv.querySelectorAll("li").forEach((li) => {
+      let depth = 0;
+      let parent = li.parentElement;
+      while (parent && parent !== tempDiv) {
+        if (parent.tagName && parent.tagName.toLowerCase() === "li") depth++;
+        parent = parent.parentElement;
+      }
+
+      const listParent = li.parentElement;
+      let marker = "-";
+      if (listParent && listParent.tagName && listParent.tagName.toLowerCase() === "ol") {
+        const siblings = Array.from(listParent.children).filter((child) => child.tagName && child.tagName.toLowerCase() === "li");
+        const index = siblings.indexOf(li);
+        marker = `${index >= 0 ? index + 1 : 1}.`;
+      }
+
+      li.setAttribute("data-md-depth", String(depth));
+      li.setAttribute("data-md-marker", marker);
     });
 
     // Convert strong sections to headers and clean up content
@@ -1625,14 +1848,40 @@
       })
       .replace(/<strong>([\s\S]*?)<\/strong>/g, "**$1**")
       .replace(/<em>([\s\S]*?)<\/em>/g, "*$1*")
-      .replace(/<ul[^>]*>([\s\S]*?)<\/ul>/g, (_, content) => {
+      .replace(/<(?:ul|ol)[^>]*>([\s\S]*?)<\/(?:ul|ol)>/g, (_, content) => {
         const prefs = getPreferences();
         return prefs.addExtraNewlines ? `${content}\n\n` : `${content}\n`;
-      })
-      .replace(/<li[^>]*>([\s\S]*?)<\/li>/g, (_, content) => {
-        const prefs = getPreferences();
-        return prefs.addExtraNewlines ? ` - ${content}\n\n` : ` - ${content}\n`;
       });
+
+    // Process <li> tags innermost-first to handle nesting correctly
+    const liReplace = (match, content) => {
+      const prefs = getPreferences();
+      const depthMatch = match.match(/data-md-depth="(\d+)"/);
+      const markerMatch = match.match(/data-md-marker="([^"]+)"/);
+      const depth = depthMatch ? parseInt(depthMatch[1], 10) : 0;
+      const marker = markerMatch ? markerMatch[1] : "-";
+      const itemPrefix = `${"    ".repeat(depth)}${marker} `;
+      const continuationPrefix = `${"    ".repeat(depth)}  `;
+
+      const normalized = content.trim().replace(/\n\n/g, '\n');
+      const normalizedLines = normalized ? normalized.split("\n") : [""];
+      const formatted = normalizedLines
+        .map((line, index) => {
+          if (line === "") return "";
+          if (index === 0) return `${itemPrefix}${line}`;
+
+          const currentIndent = (line.match(/^\s*/) || [""])[0].length;
+          return currentIndent < continuationPrefix.length
+            ? " ".repeat(continuationPrefix.length - currentIndent) + line
+            : line;
+        })
+        .join("\n");
+
+      return prefs.addExtraNewlines ? `${formatted}\n\n` : `${formatted}\n`;
+    };
+    while (/<li[^>]*>/.test(text)) {
+      text = text.replace(/<li[^>]*>((?:(?!<li)[\s\S])*?)<\/li>/g, liReplace);
+    }
 
     // Handle tables before removing remaining HTML
     text = text.replace(/<table[^>]*>([\s\S]*?)<\/table>/g, (match) => {
@@ -1644,7 +1893,15 @@
       const headerRows = tableDiv.querySelectorAll("thead tr");
       if (headerRows.length > 0) {
         headerRows.forEach((row) => {
-          const cells = [...row.querySelectorAll("th, td")].map((cell) => cell.textContent.trim() || " ");
+          const cells = [...row.querySelectorAll("th, td")].map((cell) => {
+            let html = cell.innerHTML;
+            html = html.replace(/<code>(.*?)<\/code>/g, '`$1`');
+            html = html.replace(/<strong>(.*?)<\/strong>/g, '**$1**');
+            html = html.replace(/<em>(.*?)<\/em>/g, '*$1*');
+            html = html.replace(/<[^>]+>/g, '');
+            html = html.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&');
+            return html.trim() || ' ';
+          });
           if (cells.length > 0) {
             rows.push(`| ${cells.join(" | ")} |`);
             // Add separator row after headers
@@ -1656,7 +1913,15 @@
       // Process body rows
       const bodyRows = tableDiv.querySelectorAll("tbody tr");
       bodyRows.forEach((row) => {
-        const cells = [...row.querySelectorAll("td")].map((cell) => cell.textContent.trim() || " ");
+        const cells = [...row.querySelectorAll("td")].map((cell) => {
+          let html = cell.innerHTML;
+          html = html.replace(/<code>(.*?)<\/code>/g, '`$1`');
+          html = html.replace(/<strong>(.*?)<\/strong>/g, '**$1**');
+          html = html.replace(/<em>(.*?)<\/em>/g, '*$1*');
+          html = html.replace(/<[^>]+>/g, '');
+          html = html.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&');
+          return html.trim() || ' ';
+        });
         if (cells.length > 0) {
           rows.push(`| ${cells.join(" | ")} |`);
         }
@@ -1668,13 +1933,26 @@
 
     // Continue with remaining HTML conversion
     text = text
-      .replace(/<pre[^>]*data-language="([^"]*)"[^>]*><code>([\s\S]*?)<\/code><\/pre>/g, "```$1\n$2\n```")
-      .replace(/<pre><code>([\s\S]*?)<\/code><\/pre>/g, "```\n$1\n```")
+      .replace(/<pre[^>]*?(?:data-language|class\s*=\s*"[^"]*language-)(?:[="]\s*)([a-zA-Z0-9_+-]+)[^>]*>(?:\s*<code[^>]*>)?([\s\S]*?)(?:<\/code>\s*)?<\/pre>/g, (_, lang, code) => {
+        const decoded = code.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&');
+        return '```' + lang + '\n' + decoded.trim() + '\n```';
+      })
+      .replace(/<pre[^>]*>(?:\s*<code[^>]*>)?([\s\S]*?)(?:<\/code>\s*)?<\/pre>/g, (_, code) => {
+        const decoded = code.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&');
+        return '```\n' + decoded.trim() + '\n```';
+      })
       .replace(/<code>(.*?)<\/code>/g, "`$1`")
       .replace(/<a\s+(?:[^>]*?\s+)?href="([^"]*)"[^>]*>(.*?)<\/a>/g, "[$2]($1)")
-      .replace(/<[^>]+>/g, ""); // Remove any remaining HTML tags
+      .replace(/<[^>]+>/g, "")
+      .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&');
 
-    // Clean up whitespace
+    // Fix malformed code fences where language appears before backticks (e.g. "powershell```")
+    text = text.replace(/^([a-zA-Z0-9_+-]+)```$/gm, '```$1');
+    // Trim trailing blank lines inside code blocks
+    text = text.replace(/(```[a-zA-Z0-9_+-]*\n)([\s\S]*?)\n\n```/g,
+      (_, open, body) => open + body.trimEnd() + '\n```');
+
+
     // Convert bold text at start of line to h3 headers, but not if inside a list item
     text = text.replace(/^(\s*)\*\*([^*\n]+)\*\*(?!.*\n\s*-)/gm, "$1### $2");
 
@@ -1693,7 +1971,7 @@
     });
 
     // Fix list spacing (no extra newlines between items)
-    text = text.replace(/\n\s*-\s+/g, "\n- ");
+    text = text.replace(/\n[ \t]-\s+/g, "\n- ");
 
     // Ensure headers have proper spacing
     text = text.replace(/([^\n])(\n#{1,3} )/g, "$1\n\n$2");
@@ -1709,45 +1987,45 @@
     text = text.replace(/(\[[0-9]+\]\([^)]+\))\s*\*\*/g, "$1");
     text = text.replace(/(\(\[[0-9]+\]\([^)]+\)\))\s*\*\*/g, "$1");
 
-    // Clean up whitespace
+    // Protect code blocks and tables from whitespace cleanup
+    const preserved = [];
+    text = text.replace(/```[\s\S]*?```/g, (match) => {
+      preserved.push(match);
+      return `%%PRESERVE_${preserved.length - 1}%%`;
+    });
+    text = text.replace(/\n\n(\|[^\n]+\n\|[^\n]+\n(?:\|[^\n]+\n?)*)/g, (_m, table) => {
+      preserved.push(table);
+      return `\n\n%%PRESERVE_${preserved.length - 1}%%`;
+    });
+
+    // Clean up whitespace (outside code blocks/tables)
     text = text
-      .replace(/^[\s\n]+|[\s\n]+$/g, "") // Trim start and end
-      .replace(/^\s+/gm, "") // Remove leading spaces on each line
-      .replace(/[ \t]+$/gm, "") // Remove trailing spaces
+      .replace(/^[\s\n]+|[\s\n]+$/g, "")
+      .replace(/[ \t]+$/gm, "")
       .trim();
 
     // Handle newline spacing based on user preference
     const prefs = getPreferences();
     if (prefs.addExtraNewlines) {
-      // Keep extra newlines (max two consecutive)
       text = text.replace(/\n{3,}/g, "\n\n");
     } else {
-      // Strip ALL extra newlines by default - single newlines only everywhere
       text = text
-        .replace(/\n+/g, "\n") // Replace any multiple newlines with single newline
-        .replace(/\n\s*\n/g, "\n"); // Remove any newlines with just whitespace between them
+        .replace(/\n+/g, "\n")
+        .replace(/\n\s*\n/g, "\n");
     }
+
+    // Restore code blocks and tables (tables get blank line before them)
+    preserved.forEach((block, i) => {
+      const isTable = block.startsWith("|");
+      text = text.replace(`%%PRESERVE_${i}%%`, isTable ? `\n${block.trimEnd()}` : block);
+    });
 
     if (citationStyle === CITATION_STYLES.INLINE || citationStyle === CITATION_STYLES.PARENTHESIZED) {
       // Remove extraneous space before a period, but preserve newlines
       text = text.replace(/ (?=\.)/g, "");
     }
 
-    // Add citations at the bottom for endnotes style
-    if (citationStyle === CITATION_STYLES.ENDNOTES && citationRefs.size > 0) {
-      text += "\n\n### Sources\n";
-      for (const [number, { href }] of citationRefs) {
-        text += `[${number}] ${href}\n`;
-      }
-    }
-
-    // Add footnote definitions at the bottom for footnotes style
-    if (citationStyle === CITATION_STYLES.FOOTNOTES && citationRefs.size > 0) {
-      text += "\n\n";
-      for (const [number, { href }] of citationRefs) {
-        text += `[^${number}]: ${href}\n`;
-      }
-    }
+    // Endnotes/footnotes are appended at document level by formatMarkdown using globalCitations
 
     return text;
   }
@@ -1774,36 +2052,42 @@
       markdown += `# ${title}\n\n`;
     }
 
+    const gap = prefs.addExtraNewlines ? "\n\n" : "\n";
+    const rule = "***";
+
+    function compactContent(text) {
+      if (prefs.addExtraNewlines) return text;
+      // Protect table blocks, then collapse extra newlines
+      const tables = [];
+      let result = text.replace(/\n\n(\|[^\n]+\n\|[^\n]+\n(?:\|[^\n]+\n?)*)/g, (_m, table) => {
+        tables.push(table);
+        return `\n\n%%TBL_${tables.length - 1}%%\n`;
+      });
+      result = result.replace(/\n+/g, "\n").replace(/\n\s*\n/g, "\n");
+      tables.forEach((table, i) => {
+        result = result.replace(`%%TBL_${i}%%`, `\n${table.trimEnd()}`);
+      });
+      return result;
+    }
+
     conversations.forEach((conv, index) => {
       if (conv.role === "Assistant") {
-        // Ensure assistant content ends with single newline
-        let cleanContent = conv.content.trim();
+        let cleanContent = indentListContinuations(compactContent(conv.content.trim()));
 
-        // Check if content starts with a header and fix formatting
-        if (cleanContent.match(/^#+ /)) {
-          // Content starts with a header - ensure role is on separate line
-          if (prefs.formatStyle === FORMAT_STYLES.FULL) {
-            markdown += `**${conv.role}:**\n\n${cleanContent}\n\n`;
-          } else {
-            markdown += `${cleanContent}\n\n`;
-          }
+        if (cleanContent.match(/^#+ /) && prefs.formatStyle === FORMAT_STYLES.FULL) {
+          markdown += `**${conv.role}:**\n\n${cleanContent}${gap}`;
+        } else if (prefs.formatStyle === FORMAT_STYLES.FULL) {
+          markdown += `**${conv.role}:** ${cleanContent}${gap}`;
         } else {
-          // Normal content formatting
-          if (prefs.formatStyle === FORMAT_STYLES.FULL) {
-            markdown += `**${conv.role}:** ${cleanContent}\n\n`;
-          } else {
-            markdown += `${cleanContent}\n\n`;
-          }
+          markdown += `${cleanContent}${gap}`;
         }
 
-        // Add divider only between assistant responses, not after the last one
         const nextAssistant = conversations.slice(index + 1).find((c) => c.role === "Assistant");
         if (nextAssistant) {
-          markdown += "---\n\n";
+          markdown += `${rule}${gap}`;
         }
       } else if (conv.role === "User" && prefs.formatStyle === FORMAT_STYLES.FULL) {
-        markdown += `**${conv.role}:** ${conv.content.trim()}\n\n`;
-        markdown += "---\n\n";
+        markdown += `**${conv.role}:** ${conv.content.trim()}${gap}${rule}${gap}`;
       }
     });
 
@@ -1848,10 +2132,10 @@
   async function copyToClipboard(content) {
     try {
       await navigator.clipboard.writeText(content);
-      return true;
+      return { ok: true, needsFocus: false, error: null };
     } catch (err) {
       console.error('Failed to copy to clipboard:', err);
-      return false;
+      return { ok: false, needsFocus: !document.hasFocus(), error: err };
     }
   }
 
@@ -1886,6 +2170,10 @@
     const existingControls = document.getElementById("perplexity-export-controls");
     if (existingControls) {
       existingControls.remove();
+    }
+    const existingFocusOverlay = document.getElementById("perplexity-focus-overlay");
+    if (existingFocusOverlay) {
+      existingFocusOverlay.remove();
     }
 
     const container = document.createElement("div");
@@ -1968,6 +2256,9 @@
     container.appendChild(optionsWrapper);
     container.appendChild(menu);
 
+    let queuedClipboardContent = null;
+    let queuedCopyFocusListener = null;
+
     function updateOptionsButtonLabel() {
       const label = `Options`;
       optionsButton.textContent = label;
@@ -1978,6 +2269,106 @@
       const prefs = getPreferences();
       const label = prefs.exportMethod === EXPORT_METHODS.CLIPBOARD ? "Copy as Markdown" : "Save as Markdown";
       exportButton.textContent = label;
+    }
+
+    function getFocusOverlay() {
+      return document.getElementById("perplexity-focus-overlay");
+    }
+
+    function setFocusOverlayMessage(title, subtitle) {
+      const overlay = getFocusOverlay();
+      if (!overlay) return;
+      const titleEl = overlay.querySelector("#perplexity-focus-overlay-title");
+      const subtitleEl = overlay.querySelector("#perplexity-focus-overlay-subtitle");
+      if (titleEl) titleEl.textContent = title;
+      if (subtitleEl) subtitleEl.textContent = subtitle;
+    }
+
+    function showFocusOverlay(title, subtitle) {
+      const overlay = getFocusOverlay();
+      if (!overlay) return;
+      setFocusOverlayMessage(title, subtitle);
+      overlay.style.display = "flex";
+    }
+
+    function hideFocusOverlay() {
+      const overlay = getFocusOverlay();
+      if (!overlay) return;
+      overlay.style.display = "none";
+    }
+
+    function setExportButtonStatus(text, resetDelayMs = 0) {
+      exportButton.textContent = text;
+      if (resetDelayMs > 0) {
+        setTimeout(() => {
+          if (!queuedClipboardContent) {
+            updateExportButtonLabel();
+          }
+        }, resetDelayMs);
+      }
+    }
+
+    function armQueuedCopyOnFocus() {
+      if (queuedCopyFocusListener) {
+        window.removeEventListener("focus", queuedCopyFocusListener);
+      }
+
+      queuedCopyFocusListener = async () => {
+        queuedCopyFocusListener = null;
+        if (!queuedClipboardContent) return;
+
+        await new Promise((resolve) => setTimeout(resolve, 120));
+        const copyResult = await copyToClipboard(queuedClipboardContent);
+
+        if (copyResult.ok) {
+          queuedClipboardContent = null;
+          hideFocusOverlay();
+          setExportButtonStatus("Copied!", 2000);
+          return;
+        }
+
+        if (copyResult.needsFocus) {
+          setExportButtonStatus("Copy queued (focus tab)");
+          showFocusOverlay("Copy queued", "Text is saved. Keep this tab focused and it will auto-copy.");
+          armQueuedCopyOnFocus();
+          return;
+        }
+
+        hideFocusOverlay();
+        setExportButtonStatus("Copy queued (click to copy)");
+      };
+
+      window.addEventListener("focus", queuedCopyFocusListener, { once: true });
+    }
+
+    async function copyWithQueuedFocus(content) {
+      const payload = typeof content === "string" ? content : queuedClipboardContent;
+      if (!payload) {
+        setExportButtonStatus("Nothing queued to copy", 2000);
+        return "empty";
+      }
+
+      const copyResult = await copyToClipboard(payload);
+
+      if (copyResult.ok) {
+        queuedClipboardContent = null;
+        hideFocusOverlay();
+        setExportButtonStatus("Copied!", 2000);
+        return "copied";
+      }
+
+      if (copyResult.needsFocus) {
+        queuedClipboardContent = payload;
+        setExportButtonStatus("Copy queued (focus tab)");
+        showFocusOverlay("Copy queued", "Text is saved. It will auto-copy when this tab regains focus.");
+        armQueuedCopyOnFocus();
+        return "queued";
+      }
+
+      queuedClipboardContent = payload;
+      hideFocusOverlay();
+      setExportButtonStatus("Copy failed (saved) - check clipboard permission");
+      return "failed";
     }
 
     function createOptionButton(label, value, currentValue, onSelect, tooltip) {
@@ -2022,7 +2413,7 @@
       return optionBtn;
     }
 
-    function appendOptionGroup(sectionEl, label, options, currentValue, onSelect, labelTooltip) {
+    function appendOptionGroup(sectionEl, label, options, currentValue, onSelect, labelTooltip, columns) {
       const group = document.createElement("div");
       group.style.display = "flex";
       group.style.flexDirection = "column";
@@ -2039,9 +2430,10 @@
         group.appendChild(groupLabel);
       }
 
+      const cols = columns || 2;
       const list = document.createElement("div");
       list.style.display = "grid";
-      list.style.gridTemplateColumns = "1fr 1fr";
+      list.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
       list.style.gap = "4px";
 
       options.forEach((opt) => {
@@ -2108,8 +2500,8 @@
         outputSection,
         "Spacing",
         [
-          { label: "Standard", value: false },
-          { label: "Extra newlines", value: true },
+          { label: "Standard", value: true, tooltip: "Blank lines between paragraphs for readable rendering" },
+          { label: "Compact", value: false, tooltip: "Single newlines only, minimal whitespace" },
         ],
         prefs.addExtraNewlines,
         (next) => GM_setValue("addExtraNewlines", next)
@@ -2160,6 +2552,20 @@
         ],
         prefs.exportMethod,
         (next) => GM_setValue("exportMethod", next)
+      );
+
+      appendOptionGroup(
+        exportSection,
+        "Extraction Method",
+        [
+          { label: "Export", value: EXTRACTION_METHODS.EXPORT, tooltip: "Likely to be most reliable, gets all citations. Intercepts Perplexity's Export as Markdown." },
+          { label: "Direct", value: EXTRACTION_METHODS.DIRECT_DOM, tooltip: "Parses the content directly, may break with site tweaks. Needs to scroll the page to load all content." },
+          { label: "Copy", value: EXTRACTION_METHODS.COPY_BUTTONS, tooltip: "Requires clipboard permissions, scrolls the page to load all content. Currently degraded (requires DOM parsing, misses YouTube citations)." },
+        ],
+        prefs.extractionMethod,
+        (next) => GM_setValue("extractionMethod", next),
+        null,
+        3
       );
 
       menu.appendChild(exportSection);
@@ -2339,6 +2745,7 @@
       const originalText = exportButton.textContent;
       exportButton.textContent = "Exporting...";
       exportButton.disabled = true;
+      let keepClipboardStatus = false;
 
       const removeNavBlocker = installNavBlocker();
       try {
@@ -2346,6 +2753,13 @@
         await new Promise((resolve) => setTimeout(resolve, 500));
 
         const prefs = getPreferences();
+
+        if (prefs.exportMethod === EXPORT_METHODS.CLIPBOARD && queuedClipboardContent) {
+          keepClipboardStatus = true;
+          await copyWithQueuedFocus();
+          return;
+        }
+
         const title = document.title.replace(" | Perplexity", "").replace(/ - Perplexity$/, "").trim();
         const safeTitle = title
           .toLowerCase()
@@ -2362,15 +2776,8 @@
             return;
           }
           if (prefs.exportMethod === EXPORT_METHODS.CLIPBOARD) {
-            const success = await copyToClipboard(markdown);
-            if (success) {
-              exportButton.textContent = "Copied!";
-              setTimeout(() => {
-                exportButton.textContent = originalText;
-              }, 2000);
-            } else {
-              alert("Failed to copy to clipboard. Please try again.");
-            }
+            keepClipboardStatus = true;
+            await copyWithQueuedFocus(markdown);
           } else {
             downloadMarkdown(markdown, filename);
           }
@@ -2387,15 +2794,8 @@
         const markdown = formatMarkdown(conversation);
 
         if (prefs.exportMethod === EXPORT_METHODS.CLIPBOARD) {
-          const success = await copyToClipboard(markdown);
-          if (success) {
-            exportButton.textContent = "Copied!";
-            setTimeout(() => {
-              exportButton.textContent = originalText;
-            }, 2000);
-          } else {
-            alert("Failed to copy to clipboard. Please try again.");
-          }
+          keepClipboardStatus = true;
+          await copyWithQueuedFocus(markdown);
         } else {
           downloadMarkdown(markdown, filename);
         }
@@ -2406,7 +2806,7 @@
         try {
           removeNavBlocker();
         } catch {}
-        if (exportButton.textContent !== "Copied!") {
+        if (!keepClipboardStatus && exportButton.textContent !== "Copied!") {
           exportButton.textContent = originalText;
         }
         exportButton.disabled = false;
@@ -2441,13 +2841,15 @@
         text-align: center;
         box-shadow: 0 12px 24px rgba(0, 0, 0, 0.4);
       ">
-        <div style="font-size: 18px; font-weight: 600; margin-bottom: 8px;">Click here to continue export</div>
-        <div style="font-size: 14px; color: #9ca3af;">Export paused - page needs focus to read clipboard</div>
+        <div id="perplexity-focus-overlay-title" style="font-size: 18px; font-weight: 600; margin-bottom: 8px;">Click here to continue export</div>
+        <div id="perplexity-focus-overlay-subtitle" style="font-size: 14px; color: #9ca3af;">Export paused - page needs focus to read clipboard</div>
       </div>
     `;
     focusOverlay.addEventListener('click', () => {
       window.focus();
-      focusOverlay.style.display = 'none';
+      if (!queuedClipboardContent) {
+        focusOverlay.style.display = 'none';
+      }
     });
     document.body.appendChild(focusOverlay);
   }
@@ -2456,7 +2858,8 @@
   function hasExportableContent() {
     if (document.querySelector(".prose.text-pretty.dark\\:prose-invert") ||
         document.querySelector("[class*='prose'][class*='prose-invert']") ||
-        document.querySelector("span[data-lexical-text='true']")) {
+        document.querySelector("span[data-lexical-text='true']") ||
+        document.querySelector("span.select-text")) {
       return true;
     }
     // Deep research: check for the report card or side panel
