@@ -1003,6 +1003,8 @@
   async function extractByDomScanSinglePass(citationStyle) {
     const processedContent = new Set();
     const collected = [];
+    const nexts = {};    // hash -> array of successor hashes
+    const inDegree = {}; // hash -> count
 
     const scroller = getScrollRoot();
     scroller.scrollTop = 0;
@@ -1011,26 +1013,23 @@
     let stableBottomCount = 0;
     let scrollAttempt = 0;
     const maxScrollAttempts = 200;
-    const scrollDelay = 90;
+    const scrollDelay = 300;
 
     while (scrollAttempt < maxScrollAttempts && stableBottomCount < 5) {
       scrollAttempt++;
       const beforeCount = collected.length;
 
       // Collect in DOM order for this viewport/state
-      const batch = collectDomMessagesInOrderOnce(citationStyle, processedContent);
-      if (batch.length > 0) {
-        for (const item of batch) {
-          collected.push(item);
-        }
-      } else {
+      const batch = collectDomMessagesInOrderOnce(citationStyle, processedContent, nexts, inDegree);
+      if (batch.length > 0)
+        collected.push(...batch);
+      else {
         // Try expanding collapsed sections and collect again
         const expanded = await clickExpandersOnce(8);
         if (expanded) {
-          const batch2 = collectDomMessagesInOrderOnce(citationStyle, processedContent);
-          if (batch2.length > 0) {
-            for (const item of batch2) collected.push(item);
-          }
+          const batch2 = collectDomMessagesInOrderOnce(citationStyle, processedContent, nexts, inDegree);
+          if (batch2.length > 0)
+            collected.push(...batch2);
         }
       }
 
@@ -1045,9 +1044,31 @@
         stableBottomCount = 0;
       }
     }
-
     // Do not return to top; keep scroller where it ended
-    return collected;
+
+    // Kahn's algorithm
+    // Determine how early each node can appear in global conversation ordering without violating any observed local sequences.
+    const result = [];
+    const queue = [];
+
+    collected.forEach(msg => {
+      // Initialize all nodes with inDegree 0 or existing count
+      if (!(msg.hash in inDegree)) inDegree[msg.hash] = 0;
+      if (inDegree[msg.hash] === 0) queue.push(msg.hash);
+    });
+
+    while (queue.length) {
+      const hash = queue.shift();
+      const msg = collected.find(m => m.hash === hash);
+      if (msg) result.push(msg);
+
+      const successors = nexts[hash] || [];
+      successors.forEach(nextHash => {
+        inDegree[nextHash]--;
+        if (inDegree[nextHash] === 0) queue.push(nextHash);
+      });
+    }
+    return result;
   }
 
   // Annotate each citation element on a live DOM node with data-urls
@@ -1110,9 +1131,10 @@
   }
 
   // Helper for Method 2: collect messages in DOM order within a pass
-  function collectDomMessagesInOrderOnce(citationStyle, processedContent) {
+  function collectDomMessagesInOrderOnce(citationStyle, processedContent, nexts, inDegree) {
     const results = [];
     const container = getThreadContainer();
+    const seenHashes = [];
 
     const assistantSelector = ".prose.text-pretty.dark\\:prose-invert, [class*='prose'][class*='prose-invert']";
     const userSelectors = ["h1[class*='group\\/query'] span.select-text", "span.select-text", ".whitespace-pre-line.text-pretty.break-words", ".group\\/query span[data-lexical-text='true']", "h1.group\\/query span[data-lexical-text='true']", "span[data-lexical-text='true']"];
@@ -1128,9 +1150,19 @@
         const md = htmlToMarkdown(cloned.innerHTML, citationStyle, null).trim();
         if (!md) return;
         const hash = md.substring(0, 200) + md.substring(Math.max(0, md.length - 50)) + md.length;
+
+        // Record local ordering constraints: every previously seen hash must come before this hash
+        seenHashes.forEach(prevHash => {
+          if (!nexts[prevHash]) nexts[prevHash] = [];
+          if (!nexts[prevHash].includes(hash)) nexts[prevHash].push(hash);
+          inDegree[hash] = (inDegree[hash] || 0) + 1;
+        });
+        seenHashes.push(hash);
+
+        // Don't store duplicates in final list
         if (processedContent.has(hash)) return;
         processedContent.add(hash);
-        results.push({ role: "Assistant", content: md });
+        results.push({ role: "Assistant", content: md, hash });
       } else {
         // User
         const root = findUserMessageRootFromElement(node);
@@ -1153,9 +1185,19 @@
         const hasCopyQueryButton = !!(root.querySelector && (root.querySelector("button[data-testid='copy-query-button']") || root.querySelector("button[aria-label='Copy Query']")));
         if (!hasCopyQueryButton && text.length < 10) return;
         const hash = text.substring(0, 200) + text.substring(Math.max(0, text.length - 50)) + text.length + "|U";
+
+        // Record local ordering constraints: every previously seen hash must come before this hash
+        seenHashes.forEach(prevHash => {
+          if (!nexts[prevHash]) nexts[prevHash] = [];
+          if (!nexts[prevHash].includes(hash)) nexts[prevHash].push(hash);
+          inDegree[hash] = (inDegree[hash] || 0) + 1;
+        });
+        seenHashes.push(hash);
+
+        // Don't store duplicates in final list
         if (processedContent.has(hash)) return;
         processedContent.add(hash);
-        results.push({ role: "User", content: text });
+        results.push({ role: "User", content: text, hash });
       }
     });
 
