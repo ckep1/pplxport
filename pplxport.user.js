@@ -1154,8 +1154,10 @@
         // Record local ordering constraints: every previously seen hash must come before this hash
         seenHashes.forEach(prevHash => {
           if (!nexts[prevHash]) nexts[prevHash] = [];
-          if (!nexts[prevHash].includes(hash)) nexts[prevHash].push(hash);
-          inDegree[hash] = (inDegree[hash] || 0) + 1;
+          if (!nexts[prevHash].includes(hash)) {
+            nexts[prevHash].push(hash);
+            inDegree[hash] = (inDegree[hash] || 0) + 1;
+          }
         });
         seenHashes.push(hash);
 
@@ -1189,8 +1191,10 @@
         // Record local ordering constraints: every previously seen hash must come before this hash
         seenHashes.forEach(prevHash => {
           if (!nexts[prevHash]) nexts[prevHash] = [];
-          if (!nexts[prevHash].includes(hash)) nexts[prevHash].push(hash);
-          inDegree[hash] = (inDegree[hash] || 0) + 1;
+          if (!nexts[prevHash].includes(hash)) {
+            nexts[prevHash].push(hash);
+            inDegree[hash] = (inDegree[hash] || 0) + 1;
+          }
         });
         seenHashes.push(hash);
 
