@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Perplexity.ai Chat Exporter
 // @namespace    https://github.com/ckep1/pplxport
-// @version      2.6.0
+// @version      2.7.0
 // @description  Export Perplexity.ai conversations as markdown with configurable citation styles
 // @author       Chris Kephart
 // @match        https://www.perplexity.ai/*
@@ -105,6 +105,30 @@
     getCitationNumber(url) {
       const normalizedUrl = normalizeUrl(url);
       return this.urlToNumber.get(normalizedUrl);
+    },
+
+    save() {
+      return {
+        urlToNumber: new Map(this.urlToNumber),
+        citationRefs: new Map(this.citationRefs),
+        nextCitationNumber: this.nextCitationNumber,
+      };
+    },
+
+    restore(state) {
+      this.urlToNumber = new Map(state.urlToNumber);
+      this.citationRefs = new Map(state.citationRefs);
+      this.nextCitationNumber = state.nextCitationNumber;
+    },
+
+    merge(state) {
+      for (const [url, num] of state.urlToNumber) {
+        if (!this.urlToNumber.has(url)) {
+          this.urlToNumber.set(url, num);
+          this.citationRefs.set(num, state.citationRefs.get(num));
+          if (num >= this.nextCitationNumber) this.nextCitationNumber = num + 1;
+        }
+      }
     },
   };
 
@@ -375,6 +399,8 @@
       if (patterns.test(label) || patterns.test(text)) {
         // avoid code-block related buttons
         if (el.closest("pre, code")) continue;
+        // avoid deep research card fullscreen/view buttons
+        if (/full screen|fullscreen/i.test(label) || /full screen|fullscreen/i.test(text)) continue;
         // avoid external anchors that might navigate
         if (el.tagName && el.tagName.toLowerCase() === "a") {
           const href = (el.getAttribute("href") || "").trim();
@@ -441,13 +467,22 @@
   // ============================================================================
 
   function isDeepResearch() {
+    // Old side panel format
     if (document.querySelector('[class*="search-side-content"]')) return true;
     if (document.querySelector('button[data-testid="asset-card-open-button"]')) return true;
+    // New inline card: has "Copy contents" or "Copy as Markdown" alongside "steps completed"
+    if (document.querySelector('button[aria-label="Copy contents"]')) return true;
+    if ([...document.querySelectorAll('button')].find(b => /copy as markdown/i.test(b.textContent))) return true;
+    // "steps completed" alone (old format without card) → treat as standard conversation
     return false;
   }
 
   async function openDeepResearchPanel() {
     if (document.querySelector('[class*="search-side-content"]')) return true;
+    // New inline formats: report is already visible, no panel to open
+    if (document.querySelector('button[aria-label="Copy contents"]')) return true;
+    if ([...document.querySelectorAll('button')].find(b => /copy as markdown/i.test(b.textContent))) return true;
+    // Old format: try opening side panel via card button
     const cardBtn = document.querySelector('button[data-testid="asset-card-open-button"]');
     if (!cardBtn) return false;
     cardBtn.click();
@@ -458,8 +493,97 @@
     return false;
   }
 
+  async function interceptCopyContents() {
+    const commId = '__pplxport_dr_copy_' + Date.now();
+    const comm = document.createElement('div');
+    comm.id = commId;
+    comm.style.display = 'none';
+    document.body.appendChild(comm);
+
+    const script = document.createElement('script');
+    script.textContent = `(function(){
+      var c=document.getElementById("${commId}");
+      var ow=navigator.clipboard.writeText.bind(navigator.clipboard);
+      navigator.clipboard.writeText=function(t){
+        c.textContent=t;
+        return ow(t);
+      };
+      window.__pplxport_copy_cleanup=function(){
+        navigator.clipboard.writeText=ow;
+        delete window.__pplxport_copy_cleanup;
+      };
+    })();`;
+    document.documentElement.appendChild(script);
+    script.remove();
+
+    try {
+      // Expand collapsed report so all citation URLs are in the DOM for scraping
+      const showFullBtn = [...document.querySelectorAll('button')].find(b => /show full report/i.test(b.textContent));
+      if (showFullBtn) {
+        simulateClick(showFullBtn);
+        await new Promise(r => setTimeout(r, 500));
+      }
+
+      const copyBtn = document.querySelector('button[aria-label="Copy contents"]')
+        || [...document.querySelectorAll('button')].find(b => /copy as markdown/i.test(b.textContent));
+      if (!copyBtn) throw new Error('No copy button found');
+      simulateClick(copyBtn);
+
+      for (let i = 0; i < 30; i++) {
+        await new Promise(r => setTimeout(r, 100));
+        if (comm.textContent) break;
+      }
+
+      return comm.textContent || null;
+    } finally {
+      const cleanup = document.createElement('script');
+      cleanup.textContent = 'if(window.__pplxport_copy_cleanup)window.__pplxport_copy_cleanup();';
+      document.documentElement.appendChild(cleanup);
+      cleanup.remove();
+      comm.remove();
+    }
+  }
+
+  async function scrapeDeepResearchDOM() {
+    // Expand collapsed report first
+    const showFullBtn = [...document.querySelectorAll('button')].find(b => /show full report/i.test(b.textContent));
+    if (showFullBtn) {
+      simulateClick(showFullBtn);
+      await new Promise(r => setTimeout(r, 500));
+    }
+
+    // Find the DR card container - walk up from a DR-specific button
+    // to the nearest ancestor that contains .prose
+    const anchor = document.querySelector('button[aria-label="Copy contents"]')
+      || [...document.querySelectorAll('button')].find(b => /copy as markdown/i.test(b.textContent));
+    if (!anchor) return null;
+
+    let cardContainer = anchor;
+    for (let d = 0; d < 8 && cardContainer; d++) {
+      if (cardContainer.querySelector?.('.prose')) break;
+      cardContainer = cardContainer.parentElement;
+    }
+
+    // Only take leaf prose nodes (skip outer wrappers that contain nested .prose)
+    const allProse = cardContainer?.querySelectorAll('.prose');
+    if (!allProse || allProse.length === 0) return null;
+    const proseEls = [...allProse].filter(p => p.querySelectorAll('.prose').length === 0);
+    if (proseEls.length === 0) return null;
+
+    const parts = [];
+    for (const prose of proseEls) {
+      annotateCitationUrls(prose);
+      const cloned = prose.cloneNode(true);
+      const md = htmlToMarkdown(cloned.innerHTML, getPreferences().citationStyle, null).trim();
+      if (md) parts.push(md);
+    }
+
+    const prefs = getPreferences();
+    const gap = prefs.addExtraNewlines ? '\n\n' : '\n';
+    return parts.length > 0 ? parts.join(gap) : null;
+  }
+
   async function interceptExportMarkdown() {
-    // Inject into page context (same sandbox issue as interceptThreadExportMarkdown)
     const commId = '__pplxport_dr_capture_' + Date.now();
     const comm = document.createElement('div');
     comm.id = commId;
@@ -793,14 +917,14 @@
     }
   }
 
-  function reformatDeepResearchMarkdown(rawMd, citationStyle) {
+  function reformatDeepResearchMarkdown(rawMd, citationStyle, { appendCitations = true } = {}) {
     // Split off the References section
     const refSplitPattern = /\n---\s*\n+## References\s*\n|(?:^|\n)## References\s*\n/;
     const parts = rawMd.split(refSplitPattern);
     let body = parts[0];
     const refsBlock = parts.length > 1 ? parts[1] : '';
 
-    // Build citation number -> URL map from references
+    // Build citation number -> URL map from references section or DOM
     // Format: "N. [Title](URL) - Description..."
     const citationUrlMap = new Map(); // number string -> { url, title }
     if (refsBlock) {
@@ -812,6 +936,20 @@
         }
       }
     }
+    // Fallback: scrape citation URLs from DOM (for "Copy contents" path which lacks ## References)
+    if (citationUrlMap.size === 0) {
+      const citationEls = document.querySelectorAll('[data-pplx-citation-url]');
+      let num = 0;
+      const seen = new Set();
+      for (const el of citationEls) {
+        const url = el.getAttribute('data-pplx-citation-url');
+        if (!url || seen.has(url)) continue;
+        seen.add(url);
+        num++;
+        const title = el.textContent.trim() || '';
+        citationUrlMap.set(String(num), { url, title });
+      }
+    }
 
     // Register all references with globalCitations for consistent numbering
     const localToGlobalMap = new Map(); // local ref number -> global citation number
@@ -820,13 +958,18 @@
       localToGlobalMap.set(localNum, globalNum);
     }
 
-    // Replace [^N] footnote citations according to citationStyle
+    // Replace [^N] or [N] citations according to citationStyle
+    // "Copy contents" produces [N], "Download as Markdown" produces [^N]
+    const hasCaret = /\[\^\d+\]/.test(body);
+    const citationRunPattern = hasCaret ? /(?:\[\^\d+\])+/g : /(?:\[\d+\])+/g;
+    const citationSinglePattern = hasCaret ? /\[\^(\d+)\]/g : /\[(\d+)\]/g;
+    const citationStripPattern = hasCaret ? /\[\^\d+\]/g : /\[\d+\]/g;
+
     if (citationStyle === CITATION_STYLES.NONE) {
-      body = body.replace(/\[\^\d+\]/g, '');
+      body = body.replace(citationStripPattern, '');
     } else {
-      // Replace runs of consecutive footnote citations like [^1][^2][^3]
-      body = body.replace(/(?:\[\^\d+\])+/g, (run) => {
-        const nums = Array.from(run.matchAll(/\[\^(\d+)\]/g)).map(m => m[1]);
+      body = body.replace(citationRunPattern, (run) => {
+        const nums = Array.from(run.matchAll(citationSinglePattern)).map(m => m[1]);
         if (nums.length === 0) return run;
 
         return nums.map(localNum => {
@@ -852,27 +995,54 @@
           }
         }).join('');
       });
+
+      // Remove space between punctuation and citation markers
+      body = body.replace(/(\.) (\[\^?\d+\])/g, '$1$2');
     }
 
-    // Append citation list at end for styles that need it
-    if (citationStyle === CITATION_STYLES.ENDNOTES && globalCitations.citationRefs.size > 0) {
-      body += '\n\n### Sources\n';
-      for (const [number, { href }] of globalCitations.citationRefs) {
-        body += `[${number}] ${href}\n`;
+    if (appendCitations) {
+      const prefs = getPreferences();
+      const gap = prefs.addExtraNewlines ? '\n\n' : '\n';
+      if (citationStyle === CITATION_STYLES.ENDNOTES && globalCitations.citationRefs.size > 0) {
+        body += `${gap}### Sources\n`;
+        for (const [number, { href }] of globalCitations.citationRefs) {
+          body += `[${number}] ${href}\n`;
+        }
+      }
+
+      if (citationStyle === CITATION_STYLES.FOOTNOTES && globalCitations.citationRefs.size > 0) {
+        body += '\n\n';
+        for (const [number, { href }] of globalCitations.citationRefs) {
+          body += `[^${number}]: ${href}\n`;
+        }
       }
     }
 
-    if (citationStyle === CITATION_STYLES.FOOTNOTES && globalCitations.citationRefs.size > 0) {
-      body += '\n\n';
-      for (const [number, { href }] of globalCitations.citationRefs) {
-        body += `[^${number}]: ${href}\n`;
-      }
+    // Convert --- to *** to avoid setext heading interpretation
+    body = body.replace(/^---$/gm, '***');
+
+    // Compact newlines if user prefers no extra whitespace
+    const prefs = getPreferences();
+    if (!prefs.addExtraNewlines) {
+      const preserved = [];
+      body = body.replace(/```[\s\S]*?```/g, (match) => {
+        preserved.push({ content: match, isTable: false });
+        return `%%COMPACT_${preserved.length - 1}%%`;
+      });
+      body = body.replace(/\n\n(\|[^\n]+\n\|[^\n]+\n(?:\|[^\n]+\n?)*)/g, (_m, table) => {
+        preserved.push({ content: table, isTable: true });
+        return `\n\n%%COMPACT_${preserved.length - 1}%%\n`;
+      });
+      body = body.replace(/\n+/g, '\n').replace(/\n\s*\n/g, '\n');
+      preserved.forEach(({ content, isTable }, i) => {
+        body = body.replace(`%%COMPACT_${i}%%`, isTable ? `\n${content.trimEnd()}` : content);
+      });
     }
 
     return body.trim();
   }
 
-  async function exportDeepResearch() {
+  async function exportDeepResearch({ appendCitations = true } = {}) {
     const prefs = getPreferences();
     globalCitations.reset();
 
@@ -886,33 +1056,71 @@
     // Wait a moment for panel to fully render
     await new Promise(r => setTimeout(r, 500));
 
-    // Get raw markdown via export interception
-    const rawMd = await interceptExportMarkdown();
+    // Match extraction method to corresponding deep research path:
+    //   EXPORT       → intercept Export > Download as Markdown
+    //   COPY_BUTTONS → intercept "Copy contents" button
+    //   DIRECT_DOM   → DOM scraping (TODO), falls back through the chain
+    let rawMd = null;
+    let fromDomScrape = false;
+    const method = prefs.extractionMethod;
+
+    if (method === EXTRACTION_METHODS.COPY_BUTTONS) {
+      rawMd = await interceptCopyContents();
+      if (!rawMd) rawMd = await interceptExportMarkdown();
+    } else if (method === EXTRACTION_METHODS.EXPORT) {
+      rawMd = await interceptExportMarkdown();
+      if (!rawMd) rawMd = await interceptCopyContents();
+    } else {
+      // DIRECT_DOM: scrape prose from DOM (citations already styled by htmlToMarkdown)
+      rawMd = await scrapeDeepResearchDOM();
+      if (rawMd) {
+        fromDomScrape = true;
+      } else {
+        rawMd = await interceptCopyContents();
+        if (!rawMd) rawMd = await interceptExportMarkdown();
+      }
+    }
     if (!rawMd) {
-      console.warn('Failed to capture exported markdown');
+      console.warn('Failed to capture deep research markdown');
       return null;
     }
 
-    // Reformat citations
-    const content = reformatDeepResearchMarkdown(rawMd, prefs.citationStyle);
+    // DOM scrape already has styled citations via htmlToMarkdown; others need reformatting
+    const content = fromDomScrape ? rawMd : reformatDeepResearchMarkdown(rawMd, prefs.citationStyle, { appendCitations });
 
     // Build final document
+    const gap = prefs.addExtraNewlines ? '\n\n' : '\n';
     let markdown = '';
 
-    // Extract title from first H1 in content
     const titleMatch = content.match(/^# (.+)$/m);
     const title = titleMatch ? titleMatch[1] : document.title.replace(/ - Perplexity$/, '').replace(/ \| Perplexity$/, '').trim();
 
     if (prefs.includeFrontmatter) {
       const timestamp = new Date().toISOString().split('T')[0];
-      markdown += `---\ntitle: ${title}\ndate: ${timestamp}\nsource: ${window.location.href}\n---\n\n`;
+      markdown += `---\ntitle: ${title}\ndate: ${timestamp}\nsource: ${window.location.href}\n---${gap}`;
     }
 
     if (prefs.titleAsH1 && !content.startsWith('# ')) {
-      markdown += `# ${title}\n\n`;
+      markdown += `# ${title}${gap}`;
     }
 
     markdown += content;
+
+    // For DOM scrape, citations were registered in globalCitations by htmlToMarkdown
+    // but endnotes/footnotes block wasn't appended yet
+    if (fromDomScrape && appendCitations && globalCitations.citationRefs.size > 0) {
+      if (prefs.citationStyle === CITATION_STYLES.ENDNOTES) {
+        markdown += `${gap}### Sources\n`;
+        for (const [number, { href }] of globalCitations.citationRefs) {
+          markdown += `[${number}] ${href}\n`;
+        }
+      } else if (prefs.citationStyle === CITATION_STYLES.FOOTNOTES) {
+        markdown += '\n\n';
+        for (const [number, { href }] of globalCitations.citationRefs) {
+          markdown += `[^${number}]: ${href}\n`;
+        }
+      }
+    }
 
     return markdown.trim();
   }
@@ -1143,6 +1351,24 @@
     const nodes = container.querySelectorAll(combined);
     nodes.forEach((node) => {
       if (node.matches(assistantSelector)) {
+        // Skip deep research report card prose (handled separately by exportDeepResearch)
+        if (isDeepResearch()) {
+          let inDrCard = false;
+          let walk = node;
+          for (let d = 0; d < 8 && walk; d++) {
+            if (walk.querySelector?.('button[aria-label="Copy contents"]')) { inDrCard = true; break; }
+            const btns = walk.querySelectorAll?.('button');
+            if (btns) {
+              for (const b of btns) {
+                if (/copy as markdown/i.test(b.textContent)) { inDrCard = true; break; }
+              }
+            }
+            if (inDrCard) break;
+            walk = walk.parentElement;
+          }
+          if (inDrCard) return;
+        }
+
         // Annotate live citation elements with their URLs before cloning
         // (cloning strips React fiber refs, but data attributes survive)
         annotateCitationUrls(node);
@@ -1529,22 +1755,28 @@
     if (prefs.addExtraNewlines) {
       content = content.replace(/\n{3,}/g, "\n\n");
     } else {
-      // Compact: protect table blocks, then strip extra newlines
-      const tableHolder = [];
+      // Compact: protect code blocks and tables, then strip extra newlines
+      const preserved = [];
+      content = content.replace(/```[\s\S]*?```/g, (match) => {
+        preserved.push({ content: match, isTable: false });
+        return `%%COMPACT_${preserved.length - 1}%%`;
+      });
       content = content.replace(/\n\n(\|[^\n]+\n\|[^\n]+\n(?:\|[^\n]+\n?)*)/g, (_m, table) => {
-        tableHolder.push(table);
-        return `\n\n%%TABLE_${tableHolder.length - 1}%%\n`;
+        preserved.push({ content: table, isTable: true });
+        return `\n\n%%COMPACT_${preserved.length - 1}%%\n`;
       });
       content = content
         .replace(/\n+/g, "\n")
         .replace(/\n\s*\n/g, "\n");
-      // Restore tables with required blank line before them
-      tableHolder.forEach((table, i) => {
-        content = content.replace(`%%TABLE_${i}%%`, `\n${table.trimEnd()}`);
+      preserved.forEach(({ content: block, isTable }, i) => {
+        content = content.replace(`%%COMPACT_${i}%%`, isTable ? `\n${block.trimEnd()}` : block);
       });
     }
 
     content = content.trim();
+
+    // Convert --- to *** to avoid setext heading interpretation
+    content = content.replace(/^---$/gm, '***');
 
     return content;
   }
@@ -1877,6 +2109,17 @@
     let text = tempDiv.innerHTML;
 
     //  Basic HTML conversion
+    // Downgrade small-font h2s to h3 (Perplexity renders sub-sections as h2 with smaller font)
+    tempDiv.querySelectorAll('h2').forEach(h2 => {
+      const fontSize = window.getComputedStyle(h2).fontSize;
+      if (fontSize && parseFloat(fontSize) < 20) {
+        const h3 = document.createElement('h3');
+        while (h2.firstChild) h3.appendChild(h2.firstChild);
+        h2.replaceWith(h3);
+      }
+    });
+    text = tempDiv.innerHTML;
+
     text = text
       .replace(/<h1[^>]*>([\s\S]*?)<\/h1>/g, "# $1")
       .replace(/<h2[^>]*>([\s\S]*?)<\/h2>/g, "## $1")
@@ -2082,36 +2325,33 @@
     const timestamp = new Date().toISOString().split("T")[0];
     const prefs = getPreferences();
 
-    let markdown = "";
-
-    // Only add frontmatter if enabled
-    if (prefs.includeFrontmatter) {
-      markdown += "---\n";
-      markdown += `title: ${title}\n`;
-      markdown += `date: ${timestamp}\n`;
-      markdown += `source: ${window.location.href}\n`;
-      markdown += "---\n\n"; // Add newline after properties
-    }
-
-    // Add title as H1 if enabled
-    if (prefs.titleAsH1) {
-      markdown += `# ${title}\n\n`;
-    }
-
     const gap = prefs.addExtraNewlines ? "\n\n" : "\n";
     const rule = "***";
+    let markdown = "";
+
+    if (prefs.includeFrontmatter) {
+      markdown += `---\ntitle: ${title}\ndate: ${timestamp}\nsource: ${window.location.href}\n---${gap}`;
+    }
+
+    if (prefs.titleAsH1) {
+      markdown += `# ${title}${gap}`;
+    }
 
     function compactContent(text) {
       if (prefs.addExtraNewlines) return text;
-      // Protect table blocks, then collapse extra newlines
-      const tables = [];
-      let result = text.replace(/\n\n(\|[^\n]+\n\|[^\n]+\n(?:\|[^\n]+\n?)*)/g, (_m, table) => {
-        tables.push(table);
-        return `\n\n%%TBL_${tables.length - 1}%%\n`;
+      // Protect code blocks and tables, then collapse extra newlines
+      const preserved = [];
+      let result = text.replace(/```[\s\S]*?```/g, (match) => {
+        preserved.push({ content: match, isTable: false });
+        return `%%COMPACT_${preserved.length - 1}%%`;
+      });
+      result = result.replace(/\n\n(\|[^\n]+\n\|[^\n]+\n(?:\|[^\n]+\n?)*)/g, (_m, table) => {
+        preserved.push({ content: table, isTable: true });
+        return `\n\n%%COMPACT_${preserved.length - 1}%%\n`;
       });
       result = result.replace(/\n+/g, "\n").replace(/\n\s*\n/g, "\n");
-      tables.forEach((table, i) => {
-        result = result.replace(`%%TBL_${i}%%`, `\n${table.trimEnd()}`);
+      preserved.forEach(({ content, isTable }, i) => {
+        result = result.replace(`%%COMPACT_${i}%%`, isTable ? `\n${content.trimEnd()}` : content);
       });
       return result;
     }
@@ -2121,7 +2361,7 @@
         let cleanContent = indentListContinuations(compactContent(conv.content.trim()));
 
         if (cleanContent.match(/^#+ /) && prefs.formatStyle === FORMAT_STYLES.FULL) {
-          markdown += `**${conv.role}:**\n\n${cleanContent}${gap}`;
+          markdown += `**${conv.role}:**${gap}${cleanContent}${gap}`;
         } else if (prefs.formatStyle === FORMAT_STYLES.FULL) {
           markdown += `**${conv.role}:** ${cleanContent}${gap}`;
         } else {
@@ -2137,18 +2377,15 @@
       }
     });
 
-    // Add global citations at the end for endnotes style
     if (prefs.citationStyle === CITATION_STYLES.ENDNOTES && globalCitations.citationRefs.size > 0) {
-      markdown += "\n\n### Sources\n";
+      markdown += `${gap}### Sources\n`;
       for (const [number, { href }] of globalCitations.citationRefs) {
-        markdown += `\n[${number}] ${href}`;
+        markdown += `[${number}] ${href}\n`;
       }
-      markdown += "\n"; // Add final newline
     }
 
-    // Add global footnote definitions at the end for footnotes style
     if (prefs.citationStyle === CITATION_STYLES.FOOTNOTES && globalCitations.citationRefs.size > 0) {
-      markdown += "\n\n";
+      markdown += '\n\n';
       for (const [number, { href }] of globalCitations.citationRefs) {
         markdown += `[^${number}]: ${href}\n`;
       }
@@ -2813,14 +3050,61 @@
           .replace(/^-+|-+$/g, "");
         const filename = `${safeTitle}.md`;
 
-        // Deep research branch: use export interception instead of DOM scraping
         if (isDeepResearch()) {
-          console.log("Deep research detected, using export interception...");
-          const markdown = await exportDeepResearch();
-          if (!markdown) {
+          const isFull = prefs.formatStyle === FORMAT_STYLES.FULL;
+
+          // Get DR report (skip citation appendix in full mode - citations go at end)
+          const drMarkdown = await exportDeepResearch({ appendCitations: !isFull });
+          if (!drMarkdown) {
             alert("Failed to export deep research content. Please try again.");
             return;
           }
+
+          let markdown;
+          if (isFull) {
+            // Full mode: [user][dr][assistant...][citations]
+            // Save DR citations before extractConversation resets globalCitations
+            const drCitations = globalCitations.save();
+            const conversation = await extractConversation(prefs.citationStyle);
+            // Merge DR citations back so formatMarkdown includes them
+            globalCitations.merge(drCitations);
+            const firstUserIdx = conversation.findIndex(c => c.role === 'User');
+            const userMsg = firstUserIdx >= 0 ? conversation[firstUserIdx] : null;
+            const rest = firstUserIdx >= 0 ? conversation.filter((_, i) => i !== firstUserIdx) : conversation;
+
+            const gap = prefs.addExtraNewlines ? '\n\n' : '\n';
+            let parts = [];
+            if (userMsg) parts.push(`**User:** ${userMsg.content.trim()}${gap}***`);
+            parts.push(drMarkdown);
+            if (rest.length > 0) {
+              const convBody = rest.map(c => {
+                const text = c.content.trim();
+                return c.role === 'User'
+                  ? `**User:** ${text}${gap}***`
+                  : `**Assistant:** ${text}`;
+              }).join(gap);
+              parts.push(`***${gap}${convBody}`);
+            }
+
+            if (prefs.citationStyle === CITATION_STYLES.ENDNOTES && globalCitations.citationRefs.size > 0) {
+              let citBlock = `### Sources\n`;
+              for (const [number, { href }] of globalCitations.citationRefs) {
+                citBlock += `[${number}] ${href}\n`;
+              }
+              parts.push(citBlock);
+            } else if (prefs.citationStyle === CITATION_STYLES.FOOTNOTES && globalCitations.citationRefs.size > 0) {
+              let citBlock = '\n';
+              for (const [number, { href }] of globalCitations.citationRefs) {
+                citBlock += `[^${number}]: ${href}\n`;
+              }
+              parts.push(citBlock);
+            }
+
+            markdown = parts.join(gap);
+          } else {
+            markdown = drMarkdown;
+          }
+
           if (prefs.exportMethod === EXPORT_METHODS.CLIPBOARD) {
             keepClipboardStatus = true;
             await copyWithQueuedFocus(markdown);
