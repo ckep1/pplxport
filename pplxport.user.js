@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Perplexity.ai Chat Exporter
 // @namespace    https://github.com/ckep1/pplxport
-// @version      2.7.0
+// @version      2.7.1
 // @description  Export Perplexity.ai conversations as markdown with configurable citation styles
 // @author       Chris Kephart
 // @match        https://www.perplexity.ai/*
@@ -2236,7 +2236,10 @@
       .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&');
 
     // Fix malformed code fences where language appears before backticks (e.g. "powershell```")
-    text = text.replace(/^([a-zA-Z0-9_+-]+)```$/gm, '```$1');
+    text = text.replace(/^\s*([a-zA-Z0-9_+-]+)```\s*$/gm, '```$1');
+    // Strip leading whitespace from code fences and ensure they're on their own line
+    text = text.replace(/^[^\S\n]*(```[a-zA-Z0-9_+-]*)\s*$/gm, '$1');
+    text = text.replace(/^[^\S\n]*(```)\s*$/gm, '$1');
     // Trim trailing blank lines inside code blocks
     text = text.replace(/(```[a-zA-Z0-9_+-]*\n)([\s\S]*?)\n\n```/g,
       (_, open, body) => open + body.trimEnd() + '\n```');
@@ -2463,7 +2466,7 @@
     container.id = "perplexity-export-controls";
     container.style.cssText = `
             position: fixed;
-            bottom: 40px;
+            bottom: 31px;
             left: 50%;
             transform: translateX(-50%);
             display: flex;
@@ -2479,15 +2482,14 @@
     exportButton.textContent = "Save as Markdown"; // Default, will be updated
     exportButton.style.cssText = `
             padding: 4px 8px;
-            background-color: #30b8c6;
-            color: black;
-            border: none;
+            background-color: rgba(255, 255, 255, 0.08);
+            color: #d6d5d4;
+            border: 1px solid rgba(255, 255, 255, 0.18);
             border-radius: 8px;
             cursor: pointer;
             font-size: 12px;
             font-weight: 600;
-            transition: background-color 0.2s;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            transition: background-color 0.2s, border-color 0.2s;
         `;
 
     const optionsWrapper = document.createElement("div");
@@ -2503,15 +2505,14 @@
     optionsButton.setAttribute("aria-expanded", "false");
     optionsButton.style.cssText = `
             padding: 4px 8px;
-            background-color: #30b8c6;
-            color: black;
-            border: none;
+            background-color: rgba(255, 255, 255, 0.08);
+            color: #d6d5d4;
+            border: 1px solid rgba(255, 255, 255, 0.18);
             border-radius: 8px;
             cursor: pointer;
             font-size: 12px;
             font-weight: 600;
-            transition: background-color 0.2s;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            transition: background-color 0.2s, border-color 0.2s;
             white-space: nowrap;
         `;
 
@@ -2526,11 +2527,12 @@
             flex-direction: column;
             gap: 10px;
             min-width: 280px;
-            background: #1F2121;
+            background: #1a1a1a;
             color: white;
             border-radius: 12px;
             padding: 12px;
-            box-shadow: 0 12px 24px rgba(0, 0, 0, 0.25);
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            box-shadow: 0 12px 24px rgba(0, 0, 0, 0.35);
         `;
 
     optionsWrapper.appendChild(optionsButton);
@@ -2664,9 +2666,9 @@
       optionBtn.style.cssText = `
                 padding: 6px 8px;
                 border-radius: 6px;
-                border: 1px solid ${value === currentValue ? "#30b8c6" : "#4a5568"};
-                background-color: ${value === currentValue ? "#30b8c6" : "#2d3748"};
-                color: ${value === currentValue ? "#0a0e13" : "#f7fafc"};
+                border: 1px solid ${value === currentValue ? "rgba(255, 255, 255, 0.5)" : "rgba(255, 255, 255, 0.14)"};
+                background-color: ${value === currentValue ? "rgba(255, 255, 255, 0.2)" : "rgba(255, 255, 255, 0.06)"};
+                color: ${value === currentValue ? "#ffffff" : "#b8bdc2"};
                 font-size: 11px;
                 text-align: center;
                 cursor: pointer;
@@ -2677,14 +2679,14 @@
             `;
       optionBtn.addEventListener("mouseenter", () => {
         if (value !== currentValue) {
-          optionBtn.style.borderColor = "#30b8c6";
-          optionBtn.style.backgroundColor = "#4a5568";
+          optionBtn.style.borderColor = "rgba(255, 255, 255, 0.25)";
+          optionBtn.style.backgroundColor = "rgba(255, 255, 255, 0.1)";
         }
       });
       optionBtn.addEventListener("mouseleave", () => {
         if (value !== currentValue) {
-          optionBtn.style.borderColor = "#4a5568";
-          optionBtn.style.backgroundColor = "#2d3748";
+          optionBtn.style.borderColor = "rgba(255, 255, 255, 0.14)";
+          optionBtn.style.backgroundColor = "rgba(255, 255, 255, 0.06)";
         }
       });
       optionBtn.addEventListener("click", () => {
@@ -2705,7 +2707,7 @@
       if (label) {
         const groupLabel = document.createElement("div");
         groupLabel.textContent = label;
-        groupLabel.style.cssText = "font-size: 12px; font-weight: 600; color: #d1d5db;";
+        groupLabel.style.cssText = "font-size: 12px; font-weight: 600; color: #b8bdc2;";
         if (labelTooltip) {
           groupLabel.setAttribute("title", labelTooltip);
           groupLabel.style.cursor = "help";
@@ -2738,7 +2740,7 @@
 
       const citationHeading = document.createElement("div");
       citationHeading.textContent = "Citation Style";
-      citationHeading.style.cssText = "font-size: 13px; font-weight: 700; color: #f9fafb;";
+      citationHeading.style.cssText = "font-size: 13px; font-weight: 700; color: #e8e8e7;";
       citationSection.appendChild(citationHeading);
 
       appendOptionGroup(
@@ -2765,7 +2767,7 @@
 
       const outputHeading = document.createElement("div");
       outputHeading.textContent = "Output Style";
-      outputHeading.style.cssText = "font-size: 13px; font-weight: 700; color: #f9fafb;";
+      outputHeading.style.cssText = "font-size: 13px; font-weight: 700; color: #e8e8e7;";
       outputSection.appendChild(outputHeading);
 
       appendOptionGroup(
@@ -2823,7 +2825,7 @@
 
       const exportHeading = document.createElement("div");
       exportHeading.textContent = "Export Options";
-      exportHeading.style.cssText = "font-size: 13px; font-weight: 700; color: #f9fafb;";
+      exportHeading.style.cssText = "font-size: 13px; font-weight: 700; color: #e8e8e7;";
       exportSection.appendChild(exportHeading);
 
       appendOptionGroup(
@@ -2858,7 +2860,7 @@
       renderOptionsMenu();
       menu.style.display = "flex";
       optionsButton.setAttribute("aria-expanded", "true");
-      optionsButton.style.backgroundColor = "#30b8c6";
+      optionsButton.style.backgroundColor = "rgba(255, 255, 255, 0.14)";
       document.addEventListener("mousedown", handleOutsideClick, true);
       document.addEventListener("keydown", handleEscapeKey, true);
     }
@@ -2866,7 +2868,7 @@
     function closeMenu() {
       menu.style.display = "none";
       optionsButton.setAttribute("aria-expanded", "false");
-      optionsButton.style.backgroundColor = "#30b8c6";
+      optionsButton.style.backgroundColor = "rgba(255, 255, 255, 0.08)";
       document.removeEventListener("mousedown", handleOutsideClick, true);
       document.removeEventListener("keydown", handleEscapeKey, true);
     }
@@ -2897,11 +2899,13 @@
     });
 
     optionsButton.addEventListener("mouseenter", () => {
-      optionsButton.style.backgroundColor = "#30b8c6";
+      optionsButton.style.backgroundColor = "rgba(255, 255, 255, 0.14)";
+      optionsButton.style.borderColor = "rgba(255, 255, 255, 0.28)";
     });
 
     optionsButton.addEventListener("mouseleave", () => {
-      optionsButton.style.backgroundColor = "#30b8c6";
+      optionsButton.style.backgroundColor = "rgba(255, 255, 255, 0.08)";
+      optionsButton.style.borderColor = "rgba(255, 255, 255, 0.18)";
     });
 
     updateOptionsButtonLabel();
@@ -3017,11 +3021,13 @@
     }, 2000);
 
     exportButton.addEventListener("mouseenter", () => {
-      exportButton.style.backgroundColor = "#30b8c6";
+      exportButton.style.backgroundColor = "rgba(255, 255, 255, 0.14)";
+      exportButton.style.borderColor = "rgba(255, 255, 255, 0.28)";
     });
 
     exportButton.addEventListener("mouseleave", () => {
-      exportButton.style.backgroundColor = "#30b8c6";
+      exportButton.style.backgroundColor = "rgba(255, 255, 255, 0.08)";
+      exportButton.style.borderColor = "rgba(255, 255, 255, 0.18)";
     });
 
     exportButton.addEventListener("click", async () => {
