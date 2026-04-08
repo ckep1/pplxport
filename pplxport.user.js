@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Perplexity.ai Chat Exporter
 // @namespace    https://github.com/ckep1/pplxport
-// @version      2.7.1
+// @version      2.7.2
 // @description  Export Perplexity.ai conversations as markdown with configurable citation styles
 // @author       Chris Kephart
 // @match        https://www.perplexity.ai/*
@@ -1276,7 +1276,19 @@
         if (inDegree[nextHash] === 0) queue.push(nextHash);
       });
     }
-    return result;
+
+    // Merge consecutive Assistant messages (multiple prose elements per turn)
+    const merged = [];
+    for (const msg of result) {
+      const prev = merged[merged.length - 1];
+      if (prev && prev.role === "Assistant" && msg.role === "Assistant") {
+        prev.content += "\n\n" + msg.content;
+        prev.hash = prev.content.substring(0, 200) + prev.content.substring(Math.max(0, prev.content.length - 50)) + prev.content.length;
+      } else {
+        merged.push({ ...msg });
+      }
+    }
+    return merged;
   }
 
   // Annotate each citation element on a live DOM node with data-urls
